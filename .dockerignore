@@ -1,0 +1,17 @@
+**
+!Dockerfile
+!requirements.txt
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/index.html
+!frontend/tsconfig.json
+!frontend/vite.config.ts
+!frontend/src/
+!frontend/src/**
+!backend/
+!backend/__init__.py
+!backend/app/
+!backend/app/**
+**/__pycache__/
+**/*.pyc

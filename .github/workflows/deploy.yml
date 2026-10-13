@@ -1,0 +1,161 @@
+name: SalesTrackr CI and Deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy.yml'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'backend/**'
+      - 'frontend/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: salestrackr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
+          .venv/bin/python -m pip install --disable-pip-version-check -e '.[dev]'
+      - name: Check backend
+        run: |
+          .venv/bin/python -m ruff check backend scripts
+          .venv/bin/python -m pytest -q
+      - name: Install UI dependencies and browser
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend exec -- playwright install --with-deps chromium
+      - name: Build and check UI
+        run: npm --prefix frontend test
+
+  deploy:
+    name: Deploy production
+    needs: checks
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+      ARTIFACT_REGISTRY_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build production image
+        id: image
+        run: |
+          image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPOSITORY}/${CLOUD_RUN_SERVICE}:${GITHUB_SHA}"
+          docker build --tag "$image" .
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+      - name: Push image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+          docker push "$IMAGE"
+      - name: Update the existing private service
+        id: deploy
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          gcloud run services describe "$CLOUD_RUN_SERVICE" --region="$GCP_REGION" --format=json > "$RUNNER_TEMP/service-before.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          service = json.loads((Path(os.environ["RUNNER_TEMP"]) / "service-before.json").read_text())
+          assert service["metadata"]["annotations"].get("run.googleapis.com/iap-enabled") == "true", "IAP must be enabled before deployment."
+          PY
+          digest="$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          gcloud run services update "$CLOUD_RUN_SERVICE" \
+            --region="$GCP_REGION" \
+            --image="${IMAGE%:*}@${digest}" \
+            --min=0 --max=1 --min-instances=0 --max-instances=1 \
+            --quiet
+          gcloud run services describe "$CLOUD_RUN_SERVICE" --region="$GCP_REGION" --format=json > "$RUNNER_TEMP/service-after.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          folder = Path(os.environ["RUNNER_TEMP"])
+          before = json.loads((folder / "service-before.json").read_text())
+          after = json.loads((folder / "service-after.json").read_text())
+          old_spec = before["spec"]["template"]["spec"]
+          new_spec = after["spec"]["template"]["spec"]
+          old_env = {item["name"]: item for item in old_spec["containers"][0]["env"]}
+          new_env = {item["name"]: item for item in new_spec["containers"][0]["env"]}
+          assert old_env == new_env, "Runtime settings or secret references changed."
+          assert old_spec["serviceAccountName"] == new_spec["serviceAccountName"], "Runtime identity changed."
+          assert after["metadata"]["annotations"].get("run.googleapis.com/iap-enabled") == "true", "IAP is not enabled."
+          assert after["metadata"]["annotations"].get("run.googleapis.com/maxScale") == "1", "Service instance limit changed."
+          scaling = after["spec"]["template"]["metadata"]["annotations"]
+          assert scaling.get("autoscaling.knative.dev/maxScale") == "1", "Revision instance limit changed."
+          assert scaling.get("autoscaling.knative.dev/minScale", "0") == "0", "Scale-to-zero is not enabled."
+          status = after["status"]
+          assert any(item["type"] == "Ready" and item["status"] == "True" for item in status["conditions"]), "Service is not ready."
+          assert status["latestReadyRevisionName"] == status["latestCreatedRevisionName"], "New revision is not ready."
+          assert any(item.get("percent") == 100 and item.get("revisionName") == status["latestReadyRevisionName"] for item in status["traffic"]), "Traffic is not on the new revision."
+          url = new_env["PUBLIC_ORIGIN"]["value"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"url={url}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+              output.write(f"### SalesTrackr deployed\n\n[Open the app]({url})\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\nThe existing Drive folder, secret references, runtime identity, and IAP protection were retained.\n")
+          PY
+      - name: Confirm anonymous access is blocked
+        env:
+          APP_URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          status="$(curl --silent --show-error --max-time 60 --output /dev/null --write-out '%{http_code}' "$APP_URL")"
+          case "$status" in
+            302|303|401|403) ;;
+            *) echo "Unexpected anonymous response: $status"; exit 1 ;;
+          esac
