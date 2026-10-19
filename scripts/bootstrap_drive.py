@@ -30,7 +30,11 @@ def create_root(backend, name):
                 fields="id",
             )
         )["id"]
-    backend._upload({"schemaVersion": 1, "rootId": root, "folders": folders}, root, "settings.json")
+    backend._upload(
+        {"schemaVersion": 2, "rootId": root, "folders": folders, "checkpointId": backend.allocate()},
+        root,
+        "settings.json",
+    )
     return root
 
 

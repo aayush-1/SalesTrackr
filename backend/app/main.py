@@ -128,7 +128,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         with repo.lock:
             repo.sync(force=True)
             fingerprint = digest({"kind": kind, "action": action, "write": write.model_dump(mode="json")})
-            prior = repo.prior_write(write.writeId, fingerprint, request.state.actor)
+            prior = repo.prior_write(write.writeId, fingerprint, request.state.actor, write.entityId)
             if prior:
                 return {"revision": prior, "warning": None, **metadata()}
             old = None if create else repo.current(write.entityId, kind)
@@ -193,7 +193,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 # Preparation is also permitted for a record awaiting conflict resolution.
                 if body.entityId not in repo.heads:
                     raise Problem("Record not found.", 404, "not_found")
-            return {"writeId": repo.backend.allocate(), "entityId": body.entityId or uuid4().hex}
+            return {"writeId": uuid4().hex, "entityId": body.entityId or repo.backend.allocate()}
 
     @app.get("/api/accounts")
     def accounts(search: str = "", offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
@@ -369,7 +369,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             fingerprint = digest(
                 {"kind": kind, "entityId": entity_id, "resolution": body.model_dump(mode="json")}
             )
-            prior = repo.prior_write(body.writeId, fingerprint, request.state.actor)
+            prior = repo.prior_write(body.writeId, fingerprint, request.state.actor, entity_id)
             if prior:
                 return {"revision": prior, "warning": None, **metadata()}
             heads = repo.heads.get(entity_id, set())
@@ -411,12 +411,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             entries = repo.history(entity_id)
             if not entries or entries[0]["entityType"] != kind:
                 raise Problem("Record not found.", 404, "not_found")
-            versions = []
-            for entry in entries[offset : offset + limit]:
-                raw = repo.backend.get(entry["id"])
-                if raw is None or digest(raw) != entry["hash"]:
-                    raise Problem("A saved history version is missing or altered.", 503, "data_altered")
-                versions.append(raw)
+            saved = {raw["id"]: raw for raw in repo.read_history(entity_id)}
+            versions = [saved[entry["id"]] for entry in entries[offset : offset + limit]]
             return {"items": versions, "total": len(entries)}
 
     @app.get("/{path:path}")

@@ -54,8 +54,8 @@ Use a separate bootstrap-created test root, not production customer records.
 1. Set `GOOGLE_TOKEN_JSON` in the operator process from the protected file; never place its contents on the command line.
 2. Exercise the Drive repository with a synthetic account, contact, and full sales journey.
 3. Verify a duplicate write-ID retry returns the original version; a changed payload with that ID is rejected.
-4. Verify two competing versions are preserved, displayed as a conflict, and resolved without deleting history.
-5. Confirm checkpoint replay after a process restart and test reconnect after using an invalid credential.
+4. Verify two overlapping saves leave the winning version intact and reject the stale update. All successful versions remain in the same entity file.
+5. Confirm checkpoint replay after a process restart, stable entity/checkpoint file IDs after repeated saves, and reconnect behavior after using an invalid credential.
 6. Run backup/restore into another empty root as described in the architecture guide.
 
 The automated adapter tests mock Google responses. They do not replace these owner-authorized integration checks.

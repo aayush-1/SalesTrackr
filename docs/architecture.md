@@ -10,7 +10,7 @@ Sources:
 
 - `backend\app\domain.py`: models, dates, workflow, payment, and follow-up rules.
 - `backend\app\main.py`: validated mutation/read APIs and static serving.
-- `backend\app\storage.py`: immutable versions, conflicts, Drive Changes/checkpoints.
+- `backend\app\storage.py`: one-file documents, embedded versions, conditional saves, Drive Changes/checkpoint.
 - `backend\app\queries.py`: the shared predicates for cards and lists.
 - `frontend\src\pages`: account, sales, collection, history, and conflict screens.
 
@@ -28,7 +28,7 @@ Payment is a details note plus a received flag/date. Notes save independently, w
 
 New records explicitly use `workflowVersion=3`. Snapshots without a version use version 1; version 2 is the earlier workflow with both Quotation sent and Follow-up. Legacy Quotation pending maps to New lead, while Quotation sent maps to Follow-up. Keep an existing Follow-up date or reuse the original quotation date if there is none. Later stages remain current. Read-time stage/date helpers apply the same mapping in backend queries, the dashboard, and frontend tables/timelines without altering stored revision content or checksums. Old records with neither date still display that gap as not recorded. The `order_received` storage key remains stable but is labelled Order in hand.
 
-Retired financial fields and the original Quotation pending/sent dates remain in immutable historical files. Financial fields are accepted as archived data when reading old snapshots, but cannot be edited through the new payment/stage actions. Payment receipt no longer depends on those amounts. Legacy history is not rewritten; changing an older record creates a new version with normalized stage dates, so removed stages cannot reappear after a backtrack.
+Retired financial fields and the original Quotation pending/sent dates remain in immutable historical snapshots inside each entity's file. Financial fields are accepted as archived data when reading old snapshots, but cannot be edited through the new payment/stage actions. Payment receipt no longer depends on those amounts. Legacy history is not rewritten; changing an older record creates a new version with normalized stage dates, so removed stages cannot reappear after a backtrack.
 
 Every stage tab filters the **current status only**: New leads, Follow-ups, Order in hand, Dispatched, Delivered, and Closed. Dispatch and delivery tabs exclude records now at later stages. Payment pending/received remain cross-stage receipt-confirmation views. Dashboard counts use the same predicates as the lists. Retired quotation and Awaiting delivery tabs are removed; the APIs reject their old view keys. All-date defaults keep old outstanding work visible.
 
@@ -46,13 +46,17 @@ Discarded records are read-only through normal mutation endpoints; restoring the
 
 ## Storage
 
-The root contains fixed child folders and `settings.json` with their IDs. File names are not identifiers. Each revision stores a schema version, stable entity ID, generated Drive file ID, parent versions, actor, action, recording timestamp, request fingerprint, and validated data snapshot.
+The version-2 root contains fixed child folders and `settings.json` with their IDs and the preallocated shared checkpoint ID. Each account, contact, and sales record occupies exactly one `<entity-id>.json` file. Its Drive file ID stays unchanged on edits. The document contains `schemaVersion=2`, the stable entity ID/type, the `current` revision, a `history` array of previous revisions, and a checksum. Each embedded revision retains its original ID, parents, actor, action, timestamp, reason, fingerprint, and full validated data snapshot. Migration never normalizes or rewrites historical business values.
 
 The client prepares a unique write ID before mutation and retains it for retries within the form. A retry looks up that ID and checks its fingerprint and actor before returning the prior result. Do not change an unconfirmed save's form values before reconciling it. Closing a browser after an ambiguous failure can lose this in-memory retry ticket; inspect the record list/history before creating again.
 
-The API checks the expected current revision, but Drive does not provide transactional compare-and-swap for this design. Two concurrent saves can form branches. Both remain durable, the record is excluded from definitive totals, and the Conflict page lets the operator select a current version with a reason. All branches remain in history. Conflict resolution can itself conflict.
+The API checks the expected current revision, then reads a consistent document/ETag and conditionally replaces the same file. File ETags and `If-Match` updates use Drive v2: live verification confirmed that v3 ignored the update precondition, while v2 returned HTTP 412 for stale ETags. A losing overlapping save returns `409 stale_edit` and must be refreshed, not silently retried against new data. An ambiguous network result remains unconfirmed until the same operation is found in embedded history. New entity files use preallocated Drive IDs; write IDs identify operations, not additional files.
 
-The index retains revision metadata and full current heads, not every old data snapshot. History content loads on demand. After a complete sync, periodic immutable checkpoints contain the projection and Changes cursor plus a checksum. Startup replays all pages after a compatible checkpoint. Corrupt checkpoints fall back to an earlier checkpoint/full scan; revoked access is never treated as an empty dataset.
+Legacy conflicting branches are retained in one document with `current=null`. They remain excluded from definitive totals until explicitly resolved; choosing a branch adds a resolution snapshot inside that same file. Local demo saves use a cross-process lock and atomic file replacement. Existing demo revision files are consolidated on load.
+
+The index retains revision metadata, entity-to-file mappings, and full current heads, not every old data snapshot. History loads the entity document on demand. Every 25 newly processed versions, the same `indexes\checkpoint.json` is updated with the projection, Changes cursor, and checksum. Startup replays all pages after that checkpoint. Missing/corrupt checkpoints fall back to a full scan; revoked access is never treated as an empty dataset.
+
+Fewer files does not mean less history or identical performance. Each save reads and rewrites the entity's growing full-history JSON. Very long-lived records can require an explicit history-archival design in the future. There are no cross-record transactions, and Drive latency, quota, connectivity, credential expiry/revocation, and account loss remain operating risks. Conditional writes protect individual entity files, not the whole workspace atomically. Keep backups; do not infer database guarantees from a one-file layout.
 
 Checksums detect accidental alteration, not an attacker with write access to the same Drive account. Treat the owner's account and raw data folder as privileged.
 
@@ -69,7 +73,7 @@ $env:GOOGLE_TOKEN_JSON = Get-Content -Raw ".secrets\drive-token.json"
 .\.venv\Scripts\python.exe -m scripts.drive_admin rebuild --root "<source-root-id>"
 ```
 
-Backup creates a checksummed manifest of all known immutable revisions in the root's `backups` folder and prints its file ID. Changes saved after the captured index state are not part of that backup. Never interpret a Drive-reported failure as a successful backup.
+Backup scans canonical documents and creates a read-back-verified, checksummed manifest of all embedded revisions in the root's `backups` folder. It prints the backup file ID. Run backups with writers stopped: a scan of several files is not a cross-record transactional snapshot. Backup is explicit, not a new file on every save. Never interpret a Drive-reported failure as a successful backup.
 
 For a restore rehearsal, use the bootstrap script to create a **new empty root** with the same OAuth client, then:
 
@@ -78,7 +82,22 @@ For a restore rehearsal, use the bootstrap script to create a **new empty root**
   --root "<source-root-id>" --backup-id "<backup-file-id>" --target-root "<empty-target-root-id>"
 ```
 
-Restore allocates new file IDs, rewrites revision-parent references, retains entity IDs and historical timestamps, and verifies the rebuilt projection. It refuses an existing populated target. If restoration is interrupted, preserve that partial root for diagnosis and retry into a different empty root; it does not claim transactional restoration. Review the restored accounts, totals, conflicts, and history before changing production's folder ID.
+Restore allocates one new Drive file per entity while retaining all original entity IDs, revision IDs, parent references, and historical values. It accepts both legacy and version-2 backup manifests and verifies the rebuilt projection. It refuses an existing populated target. If restoration is interrupted, preserve that partial root for diagnosis and retry into a different empty root; it does not claim transactional restoration. Review the restored accounts, totals, conflicts, and history before changing production's folder ID.
+
+## Migrating an existing revision-file workspace
+
+Deploy the migration-aware release to all traffic first. It deliberately pauses CRM access on a version-1 root; liveness remains available. Do not route traffic back to an old image during or after migration.
+
+```powershell
+$env:GOOGLE_TOKEN_JSON = Get-Content -Raw ".secrets\drive-token.json"
+.\.venv\Scripts\python.exe -m scripts.drive_admin migrate --root "<source-root-id>"
+.\.venv\Scripts\python.exe -m scripts.drive_admin migrate --root "<source-root-id>" `
+  --apply --writers-stopped --drain-seconds 300
+```
+
+The first command only plans. Applying sets maintenance mode, waits for old requests to drain, creates and verifies a complete source backup, then reuses one existing file per entity and embeds every historical version. It verifies exact version hashes before moving redundant files to Trash, reuses one checkpoint, verifies restart/replay, and clears maintenance only after success. It retains the verified backup ID in settings. Source changes or verification failures stop the migration with maintenance and backup retained.
+
+The operation is restartable after an interrupted conversion, cleanup, or checkpoint write: rerun the same command against the same root. A completed rerun is a no-op. This is a controlled maintenance operation, not a transaction; do not manually change source files or allow legacy writers during it. Old revision files and superseded checkpoints go to Trash rather than being permanently deleted. A code-only rollback to the version-1 storage implementation is not compatible with the migrated root.
 
 Remove the credential from the process after operating:
 
@@ -86,10 +105,10 @@ Remove the credential from the process after operating:
 Remove-Item Env:\GOOGLE_TOKEN_JSON
 ```
 
-Drive revision history and same-account backups do not survive loss of that account. An off-account backup policy requires a separate storage decision. Automatic deletion/compaction is not implemented.
+Drive revision history and same-account backups do not survive loss of that account. An off-account backup policy requires a separate storage decision. Automatic history pruning and backup-retention cleanup are not implemented.
 
 ## Verification boundary
 
-Automated tests cover domain rules, default dates/corrections, references, idempotency, stale writes, local restart recovery, IAP rejection, Drive pagination/cursor replay/error handling, and a 12,000-record/120,000-version synthetic projection. Browser checks cover a full sales journey and responsive navigation.
+Automated tests cover domain rules, default dates/corrections, references, idempotency, conditional-write races, ambiguous retries, local locking/restart recovery, legacy conflict preservation, interrupted/resumed migrations, exact backup/restore history preservation, one entity file after 100 edits, shared checkpoint reuse, IAP rejection, Drive pagination/cursor replay/error handling, and a 12,000-record/120,000-version synthetic projection. Browser checks cover a full sales journey and responsive navigation.
 
 The synthetic scale check verifies bounded current-record projections and no history-file downloads for warm list queries. It does not measure real Google network latency or quotas. Live Drive integration, the container build, and IAP deployment must be verified with the owner's project before production release.

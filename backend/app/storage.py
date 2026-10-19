@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -32,12 +33,99 @@ def digest(value: dict | list) -> str:
     return hashlib.sha256(encode(value)).hexdigest()
 
 
+def history_heads(revisions):
+    versions = {}
+    children = {}
+    for raw in revisions:
+        parsed = Revision.model_validate(raw)
+        MODELS[parsed.entityType].model_validate(parsed.data)
+        if parsed.id in versions:
+            raise Problem("A record contains duplicate history identifiers.", 503, "data_altered")
+        versions[parsed.id] = raw
+        children[parsed.id] = []
+    if not versions:
+        raise Problem("A record has no saved versions.", 503, "data_altered")
+    entity = {(r["entityType"], r["entityId"]) for r in versions.values()}
+    if len(entity) != 1:
+        raise Problem("Record history mixes different entities.", 503, "data_altered")
+    remaining = {}
+    for raw in versions.values():
+        parents = raw["parents"]
+        if len(parents) != len(set(parents)) or any(p not in versions for p in parents):
+            raise Problem("Record history has missing or repeated parents.", 503, "data_altered")
+        remaining[raw["id"]] = len(parents)
+        for parent in parents:
+            children[parent].append(raw["id"])
+    ready = [key for key, count in remaining.items() if count == 0]
+    visited = 0
+    while ready:
+        key = ready.pop()
+        visited += 1
+        for child in children[key]:
+            remaining[child] -= 1
+            if remaining[child] == 0:
+                ready.append(child)
+    if visited != len(versions):
+        raise Problem("Record history contains a cycle.", 503, "data_altered")
+    return {key for key, descendants in children.items() if not descendants}
+
+
+def document(revisions):
+    heads = history_heads(revisions)
+    current = next((r for r in revisions if heads == {r["id"]}), None)
+    value = {
+        "schemaVersion": 2,
+        "entityId": revisions[0]["entityId"],
+        "entityType": revisions[0]["entityType"],
+        "current": current,
+        "history": sorted(
+            (r for r in revisions if current is None or r["id"] != current["id"]),
+            key=lambda r: (r["createdAt"], r["id"]),
+        ),
+    }
+    return {**value, "checksum": digest(value)}
+
+
+def document_revisions(value):
+    if not isinstance(value, dict) or value.get("schemaVersion") != 2:
+        raise Problem("Expected a version-2 record document.", 503, "data_altered")
+    if set(value) != {"schemaVersion", "entityId", "entityType", "current", "history", "checksum"}:
+        raise Problem("A record document has unexpected fields.", 503, "data_altered")
+    if not isinstance(value["history"], list):
+        raise Problem("A record's embedded history is invalid.", 503, "data_altered")
+    revisions = value["history"] + ([value["current"]] if value["current"] is not None else [])
+    if document(revisions) != value:
+        raise Problem("A record's contents or checksum were altered.", 503, "data_altered")
+    return revisions
+
+
+def prior_operation(revisions, revision):
+    prior = next((r for r in revisions if r["id"] == revision["id"]), None)
+    if prior is not None and any(
+        prior[key] != revision[key] for key in ("entityId", "entityType", "fingerprint", "actor")
+    ):
+        raise Problem("Save identifier already exists with different content.", 409, "write_id_reused")
+    return prior
+
+
+def append_revision(revisions, revision):
+    prior = prior_operation(revisions, revision)
+    if prior is not None:
+        return None, prior
+    heads = history_heads(revisions) if revisions else set()
+    if heads != set(revision["parents"]):
+        raise Problem("This record changed. Refresh before editing.", 409, "stale_edit")
+    return document([*revisions, revision]), revision
+
+
 class LocalBackend:
     """Local demo only. Production never constructs this backend."""
 
     def __init__(self, directory: Path):
         self.directory = directory
         self.known_files = set()
+        self.entity_files = {}
+        self.file_versions = {}
         directory.mkdir(parents=True, exist_ok=True)
 
     def allocate(self):
@@ -49,20 +137,88 @@ class LocalBackend:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def create(self, revision: dict):
-        path = self.directory / f"{revision['id']}.json"
+    @contextmanager
+    def _lock(self):
+        with (self.directory / ".storage.lock").open("a+b") as lock:
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"0")
+                lock.flush()
+            lock.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _write(self, entity_id, value):
+        path = self.directory / f"{entity_id}.json"
+        temporary = self.directory / f"{entity_id}.{uuid4().hex}.tmp"
         try:
-            with path.open("x", encoding="utf-8") as output:
-                json.dump(revision, output)
+            with temporary.open("x", encoding="utf-8") as output:
+                json.dump(value, output, ensure_ascii=False, indent=2)
                 output.flush()
                 os.fsync(output.fileno())
-        except FileExistsError:
-            existing = self.get(revision["id"])
-            if existing != revision:
-                raise Problem("This save identifier is already used.", 409, "write_id_reused") from None
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def create(self, revision: dict):
+        with self._lock():
+            existing = self.get(revision["entityId"])
+            revisions = document_revisions(existing) if existing is not None else []
+            value, saved = append_revision(revisions, revision)
+            if value is not None:
+                self._write(revision["entityId"], value)
+            self.entity_files[revision["entityId"]] = revision["entityId"]
+            self.file_versions[revision["entityId"]] = {r["id"] for r in revisions} | {saved["id"]}
+            return saved
+
+    def revisions(self, entity_id):
+        value = self.get(entity_id)
+        if value is None:
+            raise Problem("A saved record is missing.", 503, "data_removed")
+        return document_revisions(value)
 
     def initial(self):
-        return None, [json.loads(p.read_text(encoding="utf-8")) for p in self.directory.glob("*.json")], None
+        with self._lock():
+            groups, legacy = {}, []
+            for path in self.directory.glob("*.json"):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if value.get("schemaVersion") == 2:
+                    revisions = document_revisions(value)
+                    if path.stem != value["entityId"]:
+                        raise Problem("A record file has the wrong name.", 503, "data_altered")
+                else:
+                    Revision.model_validate(value)
+                    revisions = [value]
+                    legacy.append(path)
+                for raw in revisions:
+                    versions = groups.setdefault(raw["entityId"], {})
+                    if raw["id"] in versions and versions[raw["id"]] != raw:
+                        raise Problem("Conflicting local history content.", 503, "data_altered")
+                    versions[raw["id"]] = raw
+            if legacy:
+                for entity_id, versions in groups.items():
+                    self._write(entity_id, document(list(versions.values())))
+                for path in legacy:
+                    if path.stem not in groups:
+                        path.unlink()
+            self.entity_files = {entity: entity for entity in groups}
+            self.file_versions = {entity: set(versions) for entity, versions in groups.items()}
+            revisions = [raw for versions in groups.values() for raw in versions.values()]
+            return None, revisions, None
 
     def changes(self, cursor):
         # Detect a second demo process or manual edit rather than relying on process-local state.
@@ -77,7 +233,7 @@ class LocalBackend:
 
 
 class DriveBackend:
-    def __init__(self, token_json: str, root_id: str):
+    def __init__(self, token_json: str, root_id: str, *, operator=False):
         info = json.loads(token_json)
         if not info.get("refresh_token"):
             raise RuntimeError("Drive credential must contain a refresh token.")
@@ -85,7 +241,13 @@ class DriveBackend:
         self.root_id = root_id
         self.folders = None
         self.service = None
+        self.conditional_service = None
         self.ignore_checkpoints = False
+        self.operator = operator
+        self.settings_id = None
+        self.settings = None
+        self.entity_files = {}
+        self.file_versions = {}
 
     def _api(self):
         if self.service is None:
@@ -96,6 +258,17 @@ class DriveBackend:
                 cache_discovery=False,
             )
         return self.service
+
+    def _conditional_api(self):
+        if self.conditional_service is None:
+            # v3 does not enforce If-Match. v2 still exposes and enforces file ETags.
+            self.conditional_service = build(
+                "drive",
+                "v2",
+                http=AuthorizedHttp(self.credentials, http=Http(timeout=20)),
+                cache_discovery=False,
+            )
+        return self.conditional_service
 
     def _execute(self, request):
         try:
@@ -119,6 +292,8 @@ class DriveBackend:
                 raise Problem(
                     "The Drive Changes cursor expired; rebuild the index.", 503, "cursor_expired"
                 ) from None
+            if status == 412:
+                raise Problem("This record changed. Refresh before editing.", 409, "stale_edit") from None
             if status in (401, 403):
                 raise Problem(
                     "Drive denied access or its quota was exceeded. "
@@ -146,37 +321,57 @@ class DriveBackend:
             if not token:
                 break
 
-    def _folders(self):
-        if self.folders is None:
+    def _folders(self, *, refresh=False, allow_legacy=False):
+        if self.folders is None or refresh:
             # Root IDs come from operator configuration, never arbitrary request input.
             if not self.root_id.replace("-", "").replace("_", "").isalnum():
                 raise Problem("Invalid configured Drive root ID.", 503, "drive_config")
-            files = list(
-                self._list(f"'{self.root_id}' in parents and name = 'settings.json' and trashed = false")
-            )
-            if len(files) != 1:
-                raise Problem(
-                    "Run the Drive bootstrap: exactly one settings.json is required.", 503, "drive_config"
+            if self.settings_id is None:
+                files = list(
+                    self._list(f"'{self.root_id}' in parents and name = 'settings.json' and trashed = false")
                 )
-            settings = self.get(files[0]["id"])
-            if settings.get("schemaVersion") != 1 or settings.get("rootId") != self.root_id:
-                raise Problem("The Drive folder configuration is incompatible.", 503, "drive_config")
-            self.folders = settings["folders"]
-            for key in (*FOLDERS, "indexes", "backups"):
-                metadata = self._execute(
-                    self._api()
-                    .files()
-                    .get(
-                        fileId=self.folders[key],
-                        fields="id,parents,mimeType,trashed",
+                if len(files) != 1:
+                    raise Problem(
+                        "Run the Drive bootstrap: exactly one settings.json is required.", 503, "drive_config"
                     )
+                self.settings_id = files[0]["id"]
+            settings = self.get(self.settings_id)
+            if (
+                not isinstance(settings, dict)
+                or settings.get("schemaVersion") not in (1, 2)
+                or settings.get("rootId") != self.root_id
+            ):
+                raise Problem("The Drive folder configuration is incompatible.", 503, "drive_config")
+            if settings.get("maintenance") and not self.operator:
+                raise Problem(
+                    "Storage maintenance is in progress. Retry shortly.", 503, "storage_maintenance"
                 )
-                if (
-                    metadata.get("trashed")
-                    or self.root_id not in metadata.get("parents", [])
-                    or (metadata["mimeType"] != "application/vnd.google-apps.folder")
-                ):
-                    raise Problem("A configured Drive folder is missing or moved.", 503, "drive_config")
+            if settings["schemaVersion"] == 1 and not allow_legacy:
+                raise Problem(
+                    "Storage is awaiting the one-file migration. Saves are paused until it completes.",
+                    503,
+                    "migration_required",
+                )
+            if settings["schemaVersion"] == 2 and not settings.get("checkpointId"):
+                raise Problem("The shared checkpoint ID is missing.", 503, "drive_config")
+            if self.folders != settings["folders"]:
+                for key in (*FOLDERS, "indexes", "backups"):
+                    metadata = self._execute(
+                        self._api()
+                        .files()
+                        .get(
+                            fileId=settings["folders"][key],
+                            fields="id,parents,mimeType,trashed",
+                        )
+                    )
+                    if (
+                        metadata.get("trashed")
+                        or self.root_id not in metadata.get("parents", [])
+                        or (metadata["mimeType"] != "application/vnd.google-apps.folder")
+                    ):
+                        raise Problem("A configured Drive folder is missing or moved.", 503, "drive_config")
+            self.settings = settings
+            self.folders = settings["folders"]
         return self.folders
 
     def allocate(self):
@@ -199,13 +394,66 @@ class DriveBackend:
             raise Problem("Drive needs reconnection.", 503, "drive_reconnect") from None
         return json.loads(content)
 
+    def etag(self, file_id):
+        return self._execute(self._conditional_api().files().get(fileId=file_id, fields="etag"))["etag"]
+
+    def versioned_get(self, file_id):
+        before = self.etag(file_id)
+        content = self.get(file_id)
+        after = self.etag(file_id)
+        if before != after:
+            raise Problem("This record changed. Refresh before editing.", 409, "stale_edit")
+        if content is None:
+            raise Problem("A saved record is missing.", 503, "data_removed")
+        return content, after
+
+    def replace(self, file_id, data, etag, *, name=None, properties=None):
+        payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
+        body = {}
+        if name is not None:
+            body["title"] = name
+        if properties is not None:
+            body["properties"] = [
+                {"key": key, "value": value, "visibility": "PRIVATE"} for key, value in properties.items()
+            ]
+        request = self._conditional_api().files().update(
+            fileId=file_id,
+            body=body,
+            media_body=MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json"),
+            fields="id",
+        )
+        request.headers["If-Match"] = etag
+        try:
+            return request.execute(num_retries=0)
+        except HttpError as error:
+            if error.resp.status == 412:
+                raise Problem("This record changed. Refresh before editing.", 409, "stale_edit") from None
+            raise Problem(
+                "Drive save is unconfirmed. Retry without changing this save.", 503, "save_unknown"
+            ) from None
+        except (OSError, HttpLib2Error, TransportError):
+            raise Problem(
+                "Drive save is unconfirmed. Retry without changing this save.", 503, "save_unknown"
+            ) from None
+        except RefreshError:
+            raise Problem("Drive needs reconnection; save is unconfirmed.", 503, "drive_reconnect") from None
+
+    def trash(self, file_id, *, etag=None):
+        if etag is None:
+            _, etag = self.versioned_get(file_id)
+        request = self._conditional_api().files().update(
+            fileId=file_id, body={"labels": {"trashed": True}}, fields="id"
+        )
+        request.headers["If-Match"] = etag
+        return self._execute(request)
+
     def _upload(self, data, parent, filename, file_id=None, properties=None):
         body = {"name": filename, "parents": [parent], "mimeType": "application/json"}
         if file_id:
             body["id"] = file_id
         if properties:
             body["appProperties"] = properties
-        payload = encode(data)
+        payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
         media = MediaIoBaseUpload(
             io.BytesIO(payload), mimetype="application/json", resumable=len(payload) > 5_000_000
         )
@@ -232,49 +480,99 @@ class DriveBackend:
             ) from None
 
     def create(self, revision):
-        parent = self._folders()[revision["entityType"]]
-        self._upload(
-            revision,
-            parent,
-            f"{revision['entityId']}__{revision['id']}.json",
-            revision["id"],
-            {"app": "salestrackr", "entityType": revision["entityType"], "entityId": revision["entityId"]},
-        )
+        folders = self._folders(refresh=True)
+        entity_id = revision["entityId"]
+        file_id = self.entity_files.get(entity_id)
+        if file_id:
+            value, etag = self.versioned_get(file_id)
+            revisions = document_revisions(value)
+        else:
+            revisions, etag = [], None
+            file_id = entity_id
+        value, saved = append_revision(revisions, revision)
+        if value is None:
+            return saved
+        try:
+            if etag is not None:
+                self.replace(file_id, value, etag)
+            else:
+                self._upload(
+                    value,
+                    folders[revision["entityType"]],
+                    f"{entity_id}.json",
+                    file_id,
+                    {"app": "salestrackr", "entityType": revision["entityType"], "entityId": entity_id},
+                )
+        except Problem as error:
+            if error.code not in ("stale_edit", "write_id_reused"):
+                raise
+            latest = self.get(file_id)
+            if latest is not None:
+                prior = prior_operation(document_revisions(latest), revision)
+                if prior is not None:
+                    self.entity_files[entity_id] = file_id
+                    self.file_versions[file_id] = {r["id"] for r in document_revisions(latest)}
+                    return prior
+            raise Problem("This record changed. Refresh before editing.", 409, "stale_edit") from None
+        self.entity_files[entity_id] = file_id
+        self.file_versions[file_id] = {r["id"] for r in [*revisions, saved]}
+        return saved
+
+    def revisions(self, entity_id):
+        file_id = self.entity_files.get(entity_id)
+        if not file_id:
+            raise Problem("The record's Drive file is not indexed.", 503, "index_incomplete")
+        value = self.get(file_id)
+        if value is None:
+            raise Problem("A saved record is missing.", 503, "data_removed")
+        revisions = document_revisions(value)
+        if value["entityId"] != entity_id:
+            raise Problem("A Drive file belongs to the wrong record.", 503, "data_altered")
+        return revisions
+
+    def _ingest(self, file_id, value, kind):
+        revisions = document_revisions(value)
+        entity = value["entityId"]
+        if value["entityType"] != kind:
+            raise Problem("A record is in the wrong Drive folder.", 503, "data_altered")
+        if entity in self.entity_files and self.entity_files[entity] != file_id:
+            raise Problem("Multiple Drive files exist for one record.", 503, "data_altered")
+        ids = {r["id"] for r in revisions}
+        if not self.file_versions.get(file_id, set()).issubset(ids):
+            raise Problem("A record's saved history was removed.", 503, "data_altered")
+        self.entity_files[entity] = file_id
+        self.file_versions[file_id] = ids
+        return revisions
 
     def initial(self):
-        folders = self._folders()
-        checkpoints = list(
-            self._list(
-                f"'{folders['indexes']}' in parents and trashed = false",
-                fields="id,createdTime",
-            )
-        )
-        for file in (
-            []
-            if self.ignore_checkpoints
-            else sorted(
-                checkpoints,
-                key=lambda f: f["createdTime"],
-                reverse=True,
-            )
-        ):
+        folders = self._folders(refresh=True)
+        self.entity_files, self.file_versions = {}, {}
+        if not self.ignore_checkpoints:
             try:
-                checkpoint = self.get(file["id"])
+                checkpoint = self.get(self.settings["checkpointId"])
                 state = checkpoint.get("state", {}) if isinstance(checkpoint, dict) else {}
                 if (
                     isinstance(checkpoint, dict)
-                    and checkpoint.get("format") == 1
+                    and checkpoint.get("format") == 2
                     and checkpoint.get("rootId") == self.root_id
-                    and set(state) == {"meta", "heads", "headData", "cursor"}
+                    and set(state) == {"meta", "heads", "headData", "cursor", "entityFiles"}
                     and checkpoint.get("checksum") == digest(state)
                     and isinstance(state["cursor"], str)
-                    and all(isinstance(state[k], dict) for k in ("meta", "heads", "headData"))
+                    and all(isinstance(state[k], dict) for k in ("meta", "heads", "headData", "entityFiles"))
                 ):
                     for head_id, revision in state["headData"].items():
                         parsed = Revision.model_validate(revision)
                         MODELS[parsed.entityType].model_validate(parsed.data)
                         if state["meta"][head_id]["hash"] != digest(revision):
                             raise ValueError("Checkpoint head checksum mismatch")
+                    if len(set(state["entityFiles"].values())) != len(state["entityFiles"]):
+                        raise ValueError("Checkpoint contains duplicate entity files")
+                    file_versions = {}
+                    for revision_id, metadata in state["meta"].items():
+                        file_id = state["entityFiles"][metadata["entityId"]]
+                        file_versions.setdefault(file_id, set()).add(revision_id)
+                    self.entity_files = state["entityFiles"].copy()
+                    self.file_versions = file_versions
                     return state, [], state["cursor"]
             except (ValueError, KeyError, TypeError):
                 logger.warning("Corrupt derived Drive checkpoint skipped")
@@ -287,14 +585,12 @@ class DriveBackend:
                 content = self.get(file["id"])
                 if content is None:
                     raise Problem("A record disappeared during indexing.", 503, "index_incomplete")
-                if content.get("id") != file["id"] or content.get("entityType") != key:
-                    raise Problem("An unexpected file exists in a records folder.", 503, "index_incomplete")
-                revisions.append(content)
+                revisions.extend(self._ingest(file["id"], content, key))
         return None, revisions, token
 
     def changes(self, cursor):
-        folders = self._folders()
-        allowed = {folders[key] for key in FOLDERS}
+        folders = self._folders(refresh=True)
+        allowed = {folders[key]: key for key in FOLDERS}
         revisions, removed = [], []
         while True:
             result = self._execute(
@@ -312,25 +608,42 @@ class DriveBackend:
                 if (
                     change.get("removed")
                     or metadata.get("trashed")
-                    or not allowed.intersection(metadata.get("parents", []))
+                    or not set(allowed).intersection(metadata.get("parents", []))
                 ):
-                    removed.append(change["fileId"])
+                    removed.extend(self.file_versions.get(change["fileId"], set()))
                     continue
                 content = self.get(change["fileId"])
-                if content is None or content.get("id") != change["fileId"]:
-                    raise Problem("A Drive revision is unavailable or altered.", 503, "index_incomplete")
-                revisions.append(content)
+                if content is None:
+                    raise Problem("A Drive record is unavailable.", 503, "index_incomplete")
+                kind = next(allowed[parent] for parent in metadata["parents"] if parent in allowed)
+                revisions.extend(self._ingest(change["fileId"], content, kind))
             if result.get("nextPageToken"):
                 cursor = result["nextPageToken"]
             else:
                 return revisions, result["newStartPageToken"], removed
 
     def checkpoint(self, state):
-        self._upload(
-            {"format": 1, "rootId": self.root_id, "state": state, "checksum": digest(state)},
-            self._folders()["indexes"],
-            f"checkpoint_{uuid4().hex}.json",
-        )
+        folders = self._folders()
+        value = {"format": 2, "rootId": self.root_id, "state": state, "checksum": digest(state)}
+        file_id = self.settings["checkpointId"]
+        try:
+            existing = self.get(file_id)
+        except (ValueError, TypeError):
+            logger.warning("Replacing corrupt derived Drive checkpoint")
+            existing = True
+        if existing is None:
+            self._upload(value, folders["indexes"], "checkpoint.json", file_id)
+        else:
+            metadata = self._execute(
+                self._api().files().get(fileId=file_id, fields="parents,mimeType,trashed")
+            )
+            if (
+                metadata.get("trashed")
+                or metadata.get("parents") != [folders["indexes"]]
+                or metadata.get("mimeType") != "application/json"
+            ):
+                raise Problem("The checkpoint is outside its configured index folder.", 503, "drive_config")
+            self.replace(file_id, value, self.etag(file_id), name="checkpoint.json")
 
 
 class Repository:
@@ -459,6 +772,7 @@ class Repository:
             "heads": {k: sorted(v) for k, v in self.heads.items()},
             "headData": self.head_data,
             "cursor": self.cursor,
+            "entityFiles": self.backend.entity_files.copy(),
         }
 
     def current(self, entity_id, kind=None):
@@ -492,9 +806,12 @@ class Repository:
             if len(heads) > 1
         ]
 
-    def prior_write(self, file_id, fingerprint, actor):
-        prior = self.backend.get(file_id)
-        if prior is not None:
+    def prior_write(self, write_id, fingerprint, actor, entity_id):
+        metadata = self.meta.get(write_id)
+        if metadata is not None:
+            if metadata["entityId"] != entity_id:
+                raise Problem("Save identifier belongs to another record.", 409, "write_id_reused")
+            prior = next(r for r in self.read_history(entity_id) if r["id"] == write_id)
             if prior.get("fingerprint") != fingerprint or prior.get("actor") != actor:
                 raise Problem(
                     "Save identifier was already used for a different request.", 409, "write_id_reused"
@@ -504,7 +821,7 @@ class Repository:
         return None
 
     def commit(self, revision):
-        self.backend.create(revision)
+        revision = self.backend.create(revision)
         self._apply(revision)
         warning = None
         try:
@@ -512,6 +829,16 @@ class Repository:
         except Problem as error:
             warning = f"Saved, but synchronization is pending: {error.message}"
         return {"revision": revision, "warning": warning}
+
+    def read_history(self, entity_id):
+        revisions = self.backend.revisions(entity_id)
+        expected = {key: value["hash"] for key, value in self.meta.items() if value["entityId"] == entity_id}
+        actual = {r["id"]: digest(r) for r in revisions}
+        if expected != actual:
+            raise Problem(
+                "Record history changed or is incomplete. Refresh and retry.", 503, "data_altered"
+            )
+        return revisions
 
     def history(self, entity_id):
         entries = sorted(
