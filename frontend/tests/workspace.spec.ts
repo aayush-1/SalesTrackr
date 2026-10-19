@@ -318,7 +318,10 @@ test('acquisition sorting, focused product editing and discarding retain the sav
   await page.getByLabel('Product / requirement notes', { exact: true }).fill('Updated older requirement');
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByText('Updated older requirement', { exact: true })).toBeVisible();
+  const productNotes = page.locator('.note-block').filter({
+    has: page.getByRole('heading', { name: 'Product / requirement notes', exact: true }),
+  });
+  await expect(productNotes.getByText('Updated older requirement', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Payment details', { exact: true })).toHaveValue('Unsaved payment draft');
   const edited = (await (await page.request.get(`/api/entities/record/${id}`)).json()).revision;
   expect(edited.data).toEqual({ ...original.data, productNotes: 'Updated older requirement' });

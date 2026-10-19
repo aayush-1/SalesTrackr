@@ -56,7 +56,7 @@ Repository updates use [SalesTrackr CI and Deploy](https://github.com/aayush-1/S
 
 The one-time owner consent is separate from signing into the app. Access tokens refresh automatically, but revoked authorization requires reconnection.
 
-**Storage trade-off:** Drive is not a transactional database. Immutable versions preserve competing edits; conflicts are surfaced for review. Lists use a rebuildable index with Drive checkpoints and changes replay. Do not manually edit the underlying JSON. See [architecture and recovery](docs/architecture.md).
+**Storage:** one readable JSON file per account, contact, or sales record. Saves update the same Drive file; previous snapshots stay in its embedded `history`. Conditional ETag updates reject overlapping stale saves instead of silently overwriting them. Lists use a rebuildable index and one shared, reused checkpoint file. Do not manually edit the underlying JSON. Full-history files grow with use, and Drive is not a multi-record transactional database. See [architecture, migration, and recovery](docs/architecture.md).
 
 ## Development checks
 

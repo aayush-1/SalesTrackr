@@ -100,6 +100,10 @@ def test_full_journey_and_independent_payment(client):
     assert client.get("/api/records?view=delivered").json()["total"] == 0
     assert client.get("/api/records?view=closed").json()["total"] == 1
     assert client.get(f"/api/entities/record/{row['entityId']}/history").json()["total"] == 7
+    storage = client.app.state.repo.backend
+    assert len(list(storage.directory.glob("*.json"))) == 2
+    assert storage.get(row["entityId"])["current"] == row
+    assert len(storage.get(row["entityId"])["history"]) == 6
 
 
 def test_receipt_closes_delivered_sale_and_is_retry_safe(client):
@@ -210,7 +214,8 @@ def test_legacy_workflow_and_financial_history_remain_readable(tmp_path, stage_i
     recovered.sync(force=True)
     assert recovered.current(original["entityId"])["id"] == updated["id"]
     assert recovered.history(original["entityId"])[1]["id"] == original["id"]
-    assert backend.get(original["id"]) == original
+    assert next(r for r in backend.revisions(original["entityId"]) if r["id"] == original["id"]) == original
+    assert len(list(tmp_path.glob("*.json"))) == 1
 
 
 def test_receipt_date_validation_and_note_only_updates():
@@ -415,6 +420,66 @@ def test_idempotent_retry_and_stale_write(client):
         row,
     )
     assert stale.status_code == 409
+
+
+def test_all_entity_edits_reuse_files_and_history_remains_paginated(client):
+    row = new_sale(client)
+    account_id = row["data"]["accountId"]
+    account = client.get(f"/api/entities/account/{account_id}").json()["revision"]
+    response, _ = write(client, "contact", {"accountId": account_id, "name": "Synthetic buyer"})
+    contact = response.json()["revision"]
+    storage = client.app.state.repo.backend
+    original_files = {path.name for path in storage.directory.glob("*.json")}
+    old_request = None
+    revisions = [row]
+    for index in range(5):
+        response, _ = write(
+            client, "account", {"name": f"Synthetic company {index}"},
+            f"/api/accounts/{account_id}", account, method="PATCH",
+        )
+        assert response.status_code == 200
+        account = response.json()["revision"]
+        response, _ = write(
+            client, "contact", {"accountId": account_id, "name": f"Synthetic buyer {index}"},
+            f"/api/contacts/{contact['entityId']}", contact, method="PATCH",
+        )
+        assert response.status_code == 200
+        contact = response.json()["revision"]
+        response, body = write(
+            client, "record", {"productNotes": f"Synthetic requirement {index}"},
+            f"/api/records/{row['entityId']}/product-notes", row, method="PATCH",
+        )
+        assert response.status_code == 200
+        if old_request is None:
+            old_request = body
+        row = response.json()["revision"]
+        revisions.append(row)
+    assert {path.name for path in storage.directory.glob("*.json")} == original_files
+    assert len(original_files) == 3
+    history = client.get(
+        f"/api/entities/record/{row['entityId']}/history", params={"offset": 1, "limit": 2}
+    ).json()
+    assert history["total"] == 6
+    assert history["items"] == list(reversed(revisions))[1:3]
+    retry = client.patch(
+        f"/api/records/{row['entityId']}/product-notes", json=old_request, headers=HEADERS
+    )
+    assert retry.status_code == 200 and retry.json()["revision"] == revisions[1]
+    assert storage.get(row["entityId"])["current"] == row
+    assert len(storage.revisions(row["entityId"])) == 6
+
+
+def test_reusing_an_operation_id_for_another_entity_is_rejected(client):
+    response, used = write(client, "account", {"name": "Synthetic first company"})
+    assert response.status_code == 200
+    ticket = prepare(client, "account")
+    ticket["writeId"] = used["writeId"]
+    storage = client.app.state.repo.backend
+    before = {path.name for path in storage.directory.glob("*.json")}
+    rejected, _ = write(client, "account", {"name": "Synthetic second company"}, ticket=ticket)
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "write_id_reused"
+    assert {path.name for path in storage.directory.glob("*.json")} == before
 
 
 def test_product_note_edit_changes_only_product_notes_and_preserves_retries(client):
@@ -813,7 +878,7 @@ def revision(kind, entity_id, data, parents=None):
     ).model_dump(mode="json")
 
 
-def test_two_instance_conflicts_and_restart_recovery(tmp_path):
+def test_two_instance_stale_edit_and_restart_recovery(tmp_path):
     backend = LocalBackend(tmp_path)
     root = revision("account", uuid4().hex, AccountData(name="Initial").model_dump())
     backend.create(root)
@@ -833,18 +898,19 @@ def test_two_instance_conflicts_and_restart_recovery(tmp_path):
         [root["id"]],
     )
     backend.create(a)
-    backend.create(b)
+    with pytest.raises(Problem, match="changed") as error:
+        backend.create(b)
+    assert error.value.code == "stale_edit"
     left.sync(force=True)
     right.sync(force=True)
-    assert len(left.conflicts()) == len(right.conflicts()) == 1
-    assert not left.list("account")
-    merged = revision("account", root["entityId"], a["data"], [a["id"], b["id"]])
-    backend.create(merged)
+    assert not left.conflicts() and not right.conflicts()
+    assert left.current(root["entityId"]) == right.current(root["entityId"]) == a
     recovered = Repository(backend)
     recovered.sync(force=True)
     assert not recovered.conflicts()
-    assert recovered.current(root["entityId"])["id"] == merged["id"]
-    assert len(recovered.history(root["entityId"])) == 4
+    assert recovered.current(root["entityId"])["id"] == a["id"]
+    assert len(recovered.history(root["entityId"])) == 2
+    assert len(list(tmp_path.glob("*.json"))) == 1
 
 
 def test_external_changes_are_not_silently_accepted(tmp_path):
@@ -853,7 +919,7 @@ def test_external_changes_are_not_silently_accepted(tmp_path):
     backend.create(root)
     repo = Repository(backend)
     repo.sync()
-    (tmp_path / f"{root['id']}.json").write_text('{"bad":true}', encoding="utf-8")
+    (tmp_path / f"{root['entityId']}.json").write_text('{"bad":true}', encoding="utf-8")
     with pytest.raises(Problem):
         repo.sync(force=True)
     assert repo.error

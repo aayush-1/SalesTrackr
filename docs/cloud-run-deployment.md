@@ -86,7 +86,7 @@ Direct service-level IAP protects the default Cloud Run URL. Do not add `allUser
 
 `/healthz` is a minimal container liveness endpoint and does not validate Drive. Configure it as the startup/liveness probe if using HTTP probes. CRM routes remain protected; successful liveness alone is not release acceptance.
 
-The instance limits are cost controls, not locks. Immutable-version conflict handling works across overlapping instances.
+The instance limits are cost controls, not locks. Conditional ETag updates protect each entity file across overlapping instances. Do not substitute a one-instance setting for write preconditions.
 
 ## 4. Release checks
 
@@ -108,7 +108,7 @@ The UI is intentionally shown locally before these deployment steps. No cloud pr
 - Inspect redacted application error logs and set alerts for failures, quotas, revoked consent, and storage corruption. Default Uvicorn access logging is disabled in the container to avoid logging search query strings.
 - Reconnect using a new secret version and the existing root, then roll forward.
 - Retain the previous image and configuration for rollback. Rolling back an image does not undo Drive data; check schema compatibility first.
-- Do not directly edit/delete raw record versions or prune checkpoints without a retention/recovery plan.
+- Do not directly edit/delete canonical entity files or their embedded history. The shared checkpoint is derived and rebuildable.
 - Check actual Drive quotas and Google Cloud costs. Scale-to-zero saves idle resources but can introduce a cold start.
 - A missing/corrupt checkpoint may require an operator rebuild. At large volumes run the rebuild utility outside the request lifecycle before release.
 
@@ -141,6 +141,8 @@ Grant the federated repository principal `roles/iam.workloadIdentityUser` on the
 Require pull requests and the `Checks` status on `main`; zero required approvals permits a sole maintainer to merge their own PR after checks pass. No force pushes or branch deletion are needed. The initial repository bootstrap can be pushed before enabling those rules.
 
 The Google Cloud and repository permissions are one-time setup. Drive reconnection remains an operator action: add a new Secret Manager version and update the service's secret reference; subsequent workflow deployments preserve that reference.
+
+For the one-file storage upgrade, deploy the migration-aware image first, then run the [maintenance migration](architecture.md#migrating-an-existing-revision-file-workspace). The new image intentionally refuses the legacy storage layout until that operation completes. A successful container rollout alone does not imply data migration success. Do not roll back to a version-1-only image after migrating the Drive root.
 
 Authoritative references:
 

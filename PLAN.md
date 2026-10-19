@@ -189,11 +189,11 @@ Return field-specific validation errors, stale-edit conflicts, and actionable Dr
 
 Organize the root into `accounts\`, `contacts\`, `sales-records\`, `indexes\`, and `backups\`.
 
-The UI shows one record; internally, edits create new immutable JSON versions with stable entity IDs, parent-version references, schema versions, and audit history. Keep the previously agreed version/conflict safety even though there is one operator: two tabs and Cloud Run instance overlap can still race.
+Keep one JSON file per account, contact, or sales record. Saves update that same Drive file. The document embeds a current snapshot and previous immutable versions, retaining stable entity IDs, parent references, audit metadata, and full history. This replaces the original revision-per-file layout.
 
-- Pre-generate Drive file IDs for retry-safe writes. Reuse an operation's ID on retry; verify any existing file matches before acknowledging success.
-- Reject known stale edits. Preserve and visibly flag competing versions if both were saved before the conflict was detectable. Never silently use the last writer's payment data.
-- Keep a rebuildable in-memory reporting index with complete checkpoints in Drive. Load a checkpoint and replay paginated Drive Changes; do not download every historical file for each page.
+- Pre-generate one Drive file ID on creation and a separate operation ID for each save. Reconcile retries against embedded history.
+- Reject known stale edits and enforce file ETags on replacements using Drive v2. Never silently use the last writer's payment data. Preserve and explicitly resolve any branches inherited from the old layout.
+- Keep a rebuildable in-memory reporting index and reuse one shared checkpoint file in Drive. Load it and replay paginated Drive Changes; do not download every historical snapshot for each list page.
 - Capture a Changes cursor before a full rebuild and replay intervening changes. Missing/corrupt checkpoints must be recoverable from canonical versions.
 - Show stale/incomplete results and unresolved conflicts explicitly; do not silently omit them from apparently complete payment totals.
 - Only acknowledge persistence after Drive confirms the save. If the index update then fails, report "saved, synchronization pending" and recover from the stored revision.
@@ -201,7 +201,7 @@ The UI shows one record; internally, edits create new immutable JSON versions wi
 - Cloud Run disk is temporary. Neither a local JSON/SQLite file nor an in-memory cache is the durable store.
 - Creating an account and then its first sales record is two saves. If the second fails, retain the account and retry only the sales record.
 
-Drive is not a transactional database. Reports can lag, and rare conflicting edits need resolution. A single-instance setting is not a correctness guarantee. Keep the raw Drive files app-managed and document backup/restore; same-account backups do not protect against losing the entire account.
+Drive is not a transactional database. Reports can lag, large embedded histories increase per-save transfer cost, and multi-record transactions are not available. A single-instance setting is not a correctness guarantee. Keep the raw Drive files app-managed and document backup/restore; same-account backups do not protect against losing the entire account. Convert existing roots with a verified backup, paused legacy writers, restartable consolidation, and exact history verification; do not silently replace or delete history.
 
 ## 8. Google connection and deployment
 
@@ -237,7 +237,7 @@ Track execution status in the session SQL database, not Markdown checkboxes. App
 | domain-contracts | Define account/contact/sales-record schemas, six stages, date rules, payment rules, and view filters | None |
 | mock-ui | Build account pages, record form/detail, dated green stages, and all filtered tables using mock data | domain-contracts |
 | domain-api | Implement validation and APIs, including explicit stage/payment/follow-up actions and history | domain-contracts |
-| drive-storage | Connect Drive, create folders, save immutable versions, and support safe retries/conflicts | domain-api |
+| drive-storage | Connect Drive, update one file per entity with embedded history, and support conditional saves/retries | domain-api |
 | reporting-integration | Replace mocks, build the reporting index, and wire status/date/month/payment views | mock-ui, domain-api, drive-storage |
 | acceptance-hardening | Verify business rules, histories, filters, save failures, concurrency/recovery, and container behavior | reporting-integration |
 | cloud-deployment | Configure secrets/IAP and deploy/verify the protected Cloud Run app | acceptance-hardening |

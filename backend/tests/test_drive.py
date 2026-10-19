@@ -11,7 +11,7 @@ from httplib2 import Response
 
 from backend.app.domain import AccountData, Problem, RecordData, Revision, now, today
 from backend.app.queries import query_records
-from backend.app.storage import DriveBackend, Repository, digest
+from backend.app.storage import DriveBackend, Repository, digest, document
 
 
 def backend():
@@ -19,7 +19,12 @@ def backend():
     result.root_id = "test-root"
     result.folders = {"account": "a", "contact": "c", "record": "r", "indexes": "i", "backups": "b"}
     result.service = MagicMock()
+    result.conditional_service = MagicMock()
     result.ignore_checkpoints = False
+    result.settings = {"schemaVersion": 2, "checkpointId": "fixed-checkpoint"}
+    result.entity_files = {}
+    result.file_versions = {}
+    result._folders = MagicMock(return_value=result.folders)
     return result
 
 
@@ -104,10 +109,11 @@ def test_changes_pagination_removals_and_filtering():
             ],
         },
     ]
-    drive.get = MagicMock(side_effect=[one, two])
+    drive.file_versions["deleted"] = {"deleted-version"}
+    drive.get = MagicMock(side_effect=[document([one]), document([two])])
     revisions, token, removed = drive.changes("p1")
     assert revisions == [one, two] and token == "p3"
-    assert removed == ["unrelated", "deleted"]
+    assert removed == ["deleted-version"]
     assert drive.get.call_count == 2
 
 
@@ -118,10 +124,11 @@ def test_ambiguous_create_retry_uses_same_file():
         Response({"status": "409"}),
         b'{"error":{"message":"exists"}}',
     )
-    drive.get = MagicMock(return_value=revision)
-    drive.create(revision)
-    assert drive.service.files.return_value.create.call_args.kwargs["body"]["id"] == revision["id"]
-    drive.get.return_value = {**revision, "actor": "another"}
+    drive.get = MagicMock(return_value=document([revision]))
+    assert drive.create(revision) == revision
+    assert drive.service.files.return_value.create.call_args.kwargs["body"]["id"] == revision["entityId"]
+    drive.entity_files = {}
+    drive.get.return_value = document([{**revision, "actor": "another"}])
     with pytest.raises(Problem, match="different content"):
         drive.create(revision)
 
@@ -130,7 +137,7 @@ def test_checkpoint_replay_and_canonical_history():
     drive = backend()
     first = rev()
     second = rev(first["entityId"], [first["id"]])
-    source = Repository(MagicMock())
+    source = Repository(drive)
     source._apply(first)
     source.cursor = "saved-cursor"
     state = source.state()
@@ -149,13 +156,12 @@ def test_corrupt_checkpoint_falls_back_to_full_scan():
     good = rev()
     drive._list = MagicMock(
         side_effect=[
-            [{"id": "bad-checkpoint", "createdTime": "2026-01-01"}],
             [{"id": good["id"]}],
             [],
             [],
         ]
     )
-    drive.get = MagicMock(side_effect=[json.JSONDecodeError("bad json", "", 0), good])
+    drive.get = MagicMock(side_effect=[json.JSONDecodeError("bad json", "", 0), document([good])])
     drive.service.changes.return_value.getStartPageToken.return_value.execute.return_value = {
         "startPageToken": "before-scan",
     }
@@ -194,10 +200,58 @@ def test_refresh_failure_is_actionable():
     assert error.value.code == "drive_reconnect"
 
 
+def test_versioned_read_rejects_content_changed_during_download():
+    drive = backend()
+    drive.etag = MagicMock(side_effect=['"before"', '"after"'])
+    drive.get = MagicMock(return_value=document([rev()]))
+    with pytest.raises(Problem) as error:
+        drive.versioned_get("synthetic-file")
+    assert error.value.code == "stale_edit"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_code"),
+    [
+        (HttpError(Response({"status": "412"}), b"{}"), "stale_edit"),
+        (HttpError(Response({"status": "500"}), b"{}"), "save_unknown"),
+        (OSError("Synthetic connection failure"), "save_unknown"),
+        (RefreshError("Synthetic revoked token"), "drive_reconnect"),
+    ],
+)
+def test_conditional_update_is_never_retried_unconditionally(failure, expected_code):
+    drive = backend()
+    request = drive.conditional_service.files.return_value.update.return_value
+    request.headers = {}
+    request.execute.side_effect = failure
+    with pytest.raises(Problem) as error:
+        drive.replace("synthetic-file", document([rev()]), '"original-etag"')
+    assert error.value.code == expected_code
+    assert request.headers["If-Match"] == '"original-etag"'
+    request.execute.assert_called_once_with(num_retries=0)
+    drive.service.files.return_value.update.assert_not_called()
+    drive.service.files.return_value.create.assert_not_called()
+
+
+def test_corrupt_checkpoint_can_be_rebuilt_in_the_same_file():
+    drive = backend()
+    drive.get = MagicMock(side_effect=json.JSONDecodeError("Synthetic corrupt JSON", "", 0))
+    drive.etag = MagicMock(return_value='"checkpoint-etag"')
+    drive.replace = MagicMock()
+    drive.service.files.return_value.get.return_value.execute.return_value = {
+        "parents": ["i"], "mimeType": "application/json", "trashed": False,
+    }
+    state = Repository(drive).state()
+    drive.checkpoint(state)
+    assert drive.replace.call_args.args[0] == "fixed-checkpoint"
+    assert drive.replace.call_args.args[2] == '"checkpoint-etag"'
+    assert drive.replace.call_args.kwargs["name"] == "checkpoint.json"
+    drive.service.files.return_value.create.assert_not_called()
+
+
 def test_saved_revision_survives_index_failure():
     drive = backend()
     first = rev()
-    drive.create = MagicMock()
+    drive.create = MagicMock(return_value=first)
     drive.initial = MagicMock(return_value=(None, [], "initial"))
     drive.changes = MagicMock(side_effect=Problem("Unavailable", 503))
     repo = Repository(drive)
