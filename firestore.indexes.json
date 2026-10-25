@@ -1,0 +1,64 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "entities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "buckets", "arrayConfig": "CONTAINS"},
+        {"fieldPath": "acquiredOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "nameSort", "order": "ASCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "accountId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "nameChars", "arrayConfig": "CONTAINS"}
+      ]
+    },
+    {
+      "collectionGroup": "entities",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "nameSearchChars", "arrayConfig": "CONTAINS"}
+      ]
+    },
+    {
+      "collectionGroup": "revisions",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "entityId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"},
+        {"fieldPath": "id", "order": "DESCENDING"}
+      ]
+    }
+  ],
+  "fieldOverrides": [
+    {"collectionGroup": "parts", "fieldPath": "data", "indexes": []},
+    {"collectionGroup": "entities", "fieldPath": "queryData", "indexes": []},
+    {"collectionGroup": "entities", "fieldPath": "address", "indexes": []},
+    {"collectionGroup": "entities", "fieldPath": "headNames", "indexes": []}
+  ]
+}

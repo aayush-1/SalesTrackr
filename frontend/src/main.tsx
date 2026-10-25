@@ -1,17 +1,18 @@
-import { StrictMode, useCallback, useState } from 'react';
+import { StrictMode, useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import {
   ArchiveX, ArrowUpRight, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
-  Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Truck,
+  Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon, Truck,
 } from 'lucide-react';
-import { RefreshContext, useResource } from './api';
-import { Alert } from './components';
+import { RefreshContext, WorkspaceContext, useResource } from './api';
+import { Alert, Loading } from './components';
 import type { Me, Meta, Save } from './types';
 import { views } from './types';
 import { AccountDetail, AccountForm, Accounts } from './pages/accounts';
 import { Conflicts, DashboardPage, Records } from './pages/lists';
 import { NewRecordPage, RecordDetail } from './pages/record';
+import { Settings } from './pages/settings';
 import './styles.css';
 
 function Shell() {
@@ -22,6 +23,11 @@ function Shell() {
 function Workspace({ onRefresh }: { onRefresh: () => void }) {
   const identity = useResource<Me>('/me');
   const status = useResource<Meta & { error: string | null }>('/status');
+  const initialIdentity = useRef<Me | null>(null);
+  if (!initialIdentity.current && identity.data) initialIdentity.current = identity.data;
+  const workspaceChanged = initialIdentity.current && [identity.data, status.data].some(value =>
+    value?.storageBackend === 'firestore' && (initialIdentity.current?.storageBackend !== 'firestore' ||
+      initialIdentity.current.generation !== value.generation));
   const [open, setOpen] = useState(false);
   const nav = [
     ['/', 'Overview', LayoutDashboard], ['/records', 'All sales records', ClipboardList],
@@ -43,19 +49,23 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
         <div className="nav-label">PIPELINE & COLLECTIONS</div>
         {pipeline.map(([view, Icon]) => <NavLink key={view} to={`/view/${view}`} onClick={() => setOpen(false)}><Icon size={17} />{views[view].title}</NavLink>)}
       </nav>
-      <div className="sidebar-bottom"><div className="avatar">S</div><div><strong>Sales workspace</strong><small>{identity.data?.mode === 'demo' ? 'Local demo · sample data' : 'Private workspace'}</small></div><span className="online-dot" /></div>
+      <div className="sidebar-bottom"><div className="avatar">S</div><div><strong>Sales workspace</strong><small>{identity.data?.mode === 'demo' ? 'Local demo · sample data' : 'Private workspace'}</small></div>
+        <NavLink to="/settings" className="sidebar-settings" aria-label="Settings" title="Settings" onClick={() => setOpen(false)}><SettingsIcon size={17} /></NavLink>
+        <span className="online-dot" />
+      </div>
     </aside>
     <div className="workspace">
       <div className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setOpen(true)}><Menu /></button><span className="breadcrumb">Workspace <span>/</span> Sales management</span></div>
-        <div className="topbar-actions"><span className="connection"><span className="online-dot" />{identity.data?.mode === 'demo' ? 'Local demo' : 'Drive-backed'}</span>
+        <div className="topbar-actions"><span className="connection"><span className="online-dot" />{identity.data?.mode === 'demo' ? 'Local demo' : identity.data?.storageBackend === 'firestore' ? 'Firestore-backed' : 'Drive-backed'}</span>
           <button className="icon-button" title="Refresh data" aria-label="Refresh data" onClick={onRefresh}><RefreshCw size={17} /></button><div className="avatar light">S</div></div>
       </div>
       <main>
         {identity.error && <Alert>{identity.error}</Alert>}
         {status.error && <Alert>Connection check failed: {status.error}</Alert>}
         {status.data?.error && <Alert>{status.data.error} Refresh after resolving the connection problem.</Alert>}
+        {workspaceChanged && <Alert>The workspace changed. Reload this page before editing or saving. <button className="text-button" onClick={() => window.location.reload()}>Reload workspace</button></Alert>}
         {identity.data?.mode === 'demo' && <div className="demo-banner"><span>DEMO WORKSPACE</span>Sample data is saved locally. Google Drive is not connected.</div>}
-        <Outlet context={identity.data} />
+        {initialIdentity.current ? <WorkspaceContext.Provider value={initialIdentity.current}><Outlet context={identity.data || initialIdentity.current} /></WorkspaceContext.Provider> : identity.loading ? <Loading /> : <Alert>Workspace identity is unavailable. Refresh this page before continuing.</Alert>}
       </main>
       <footer>SalesTrackr <span>{status.data?.syncedAt
         ? `Last synchronized ${new Date(status.data.syncedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST${status.data.complete ? '' : ' · incomplete'}`
@@ -75,6 +85,7 @@ createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><
     <Route path="records/new" element={<NewRecordPage />} />
     <Route path="records/:id" element={<RecordDetail />} />
     <Route path="conflicts" element={<Conflicts />} />
+    <Route path="settings" element={<Settings />} />
     <Route path="*" element={<div className="empty"><h1>Page not found</h1><Link className="button primary" to="/"><Plus size={16} />Return to workspace</Link></div>} />
   </Route>
 </Routes></BrowserRouter></StrictMode>);

@@ -12,6 +12,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && useradd --create-home --uid 10001 appuser
 COPY backend/ ./backend/
+COPY scripts/ ./scripts/
 COPY --from=frontend /build/dist ./frontend/dist/
 USER appuser
 EXPOSE 8080

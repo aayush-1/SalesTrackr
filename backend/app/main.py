@@ -7,10 +7,13 @@ from uuid import uuid4
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import ValidationError
+from google.api_core.exceptions import GoogleAPICallError
+from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.responses import Response
 
 from .auth import authenticate, protect_mutation
+from .backups import MAX_ARCHIVE, BackupManager
 from .config import Settings
 from .demo import seed
 from .domain import (
@@ -20,6 +23,7 @@ from .domain import (
     DiscardChange,
     FeedbackChange,
     FollowUp,
+    Identifier,
     NewRecord,
     PaymentChange,
     Prepare,
@@ -39,6 +43,7 @@ from .domain import (
     stage_change,
     today,
 )
+from .firestore_storage import FirestoreRepository
 from .queries import VIEWS, account_matches, account_name_key, matches, query_records
 from .storage import DriveBackend, LocalBackend, Repository, digest
 from .timing import save_timing, timed_lock, timed_phase
@@ -49,11 +54,17 @@ STATIC = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 def create_app(settings: Settings | None = None, repository: Repository | None = None):
     settings = settings or Settings.load()
-    repo = repository or Repository(
-        LocalBackend(settings.data_dir)
-        if settings.mode == "demo"
-        else DriveBackend(settings.token_json, settings.root_id)
+    repo = repository or (
+        FirestoreRepository(settings)
+        if settings.storage_backend == "firestore"
+        else Repository(
+            LocalBackend(settings.data_dir)
+            if settings.mode == "demo"
+            else DriveBackend(settings.token_json, settings.root_id)
+        )
     )
+    indexed = isinstance(repo, FirestoreRepository)
+    recovery = BackupManager(repo, settings) if indexed else None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -65,6 +76,18 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
 
     app = FastAPI(title="SalesTrackr API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.repo = repo
+    app.state.recovery = recovery
+
+    @app.exception_handler(GoogleAPICallError)
+    async def database_handler(request, error):
+        logger.error("Firestore request failed: %s", type(error).__name__)
+        return JSONResponse(
+            {"error": {
+                "code": "database_unavailable",
+                "message": "The database request could not be confirmed. Retry the same action.",
+            }},
+            status_code=503,
+        )
 
     @app.exception_handler(Problem)
     async def problem_handler(request, error):
@@ -94,9 +117,18 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 request.state.actor = await run_in_threadpool(authenticate, request, settings)
                 protect_mutation(request, settings)
                 if request.method not in ("GET", "HEAD", "OPTIONS"):
-                    body = await request.body()
-                    if len(body) > 128_000:
-                        raise Problem("Request is too large.", 413, "request_size")
+                    limit = (
+                        MAX_ARCHIVE if request.url.path in ("/api/backups/inspect", "/api/backups/restore")
+                        else 128_000
+                    )
+                    parts, size = [], 0
+                    async for part in request.stream():
+                        size += len(part)
+                        if size > limit:
+                            raise Problem("Request is too large.", 413, "request_size")
+                        parts.append(part)
+                    # Preserve Starlette's body cache for the downstream request parser.
+                    request._body = b"".join(parts)
             response = await call_next(request)
         except Problem as error:
             response = await problem_handler(request, error)
@@ -112,11 +144,15 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         return response
 
     def metadata():
+        if indexed:
+            return repo.metadata()
         conflicts = len(repo.conflicts())
         return {
             "syncedAt": repo.synced_at,
             "conflictCount": conflicts,
             "complete": not conflicts and not repo.error,
+            "generation": None,
+            "storageBackend": "drive",
         }
 
     def validate_references(kind, data):
@@ -143,12 +179,21 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         return {
             **result,
             **metadata(),
-            "revisionIsCurrent": repo.heads.get(revision["entityId"]) == {revision["id"]},
+            "revisionIsCurrent": (
+                repo.is_current(revision) if indexed
+                else repo.heads.get(revision["entityId"]) == {revision["id"]}
+            ),
             **({"related": record_relations(revision["data"])} if revision["entityType"] == "record" else {}),
         }
 
     def mutate(kind, write, action, request, transform, create=False):
         with save_timing(kind, action), timed_lock(repo.lock):
+            if indexed:
+                result = repo.mutate(
+                    kind, write, action, request.state.actor, transform, create,
+                    request.headers.get("x-salestrackr-generation"),
+                )
+                return saved_response(result)
             with timed_phase("syncBeforeMs"):
                 repo.sync(force=True)
             fingerprint = digest({"kind": kind, "action": action, "write": write.model_dump(mode="json")})
@@ -210,7 +255,14 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
 
     @app.get("/api/me")
     def me(request: Request):
-        return {"email": request.state.actor, "mode": settings.mode, "today": today().isoformat()}
+        with repo.lock:
+            if indexed:
+                repo.sync()
+            return {
+                "email": request.state.actor, "mode": settings.mode, "today": today().isoformat(),
+                "storageBackend": "firestore" if indexed else "drive",
+                "generation": repo.generation if indexed else None,
+            }
 
     @app.get("/api/status")
     def status():
@@ -219,16 +271,108 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 repo.sync(force=True)
             except Problem as error:
                 return {"mode": settings.mode, **metadata(), "error": error.message}
-            return {"mode": settings.mode, **metadata(), "error": None}
+            return {"mode": settings.mode, **metadata(), "error": repo.error}
+
+    def require_recovery():
+        if recovery is None:
+            raise Problem(
+                "Backup recovery becomes available after Firestore migration.", 409, "migration_required"
+            )
+        return recovery
+
+    class BackupWrite(BaseModel):
+        writeId: Identifier
+
+    class BackupPreference(BaseModel):
+        weeklyEnabled: bool
+
+    @app.get("/api/settings/backup-recovery")
+    def recovery_settings(request: Request):
+        if recovery:
+            return recovery.status(request.state.actor)
+        return {
+            "mode": settings.mode, "storageBackend": "drive",
+            "location": "Current Drive-compatible storage; Firestore migration not activated",
+            "folderUrl": None,
+            "schedule": {
+                "enabled": False, "active": False,
+                "weekday": "Sunday", "time": "02:00", "timezone": "Asia/Kolkata",
+            },
+            "retention": 3, "backups": [], "lastBackupAt": None, "lastError": None,
+            "canBackup": False, "canRestore": False, "generation": None,
+        }
+
+    @app.post("/api/settings/backup-recovery")
+    def recovery_preference(body: BackupPreference, request: Request):
+        return require_recovery().preference(body.weeklyEnabled, request.state.actor)
+
+    @app.post("/api/backups")
+    def create_backup(body: BackupWrite, request: Request):
+        return {"backup": require_recovery().backup(body.writeId, request.state.actor)}
+
+    @app.get("/api/backups/{backup_id}/download")
+    def download_backup(backup_id: str):
+        data, _ = require_recovery().get(backup_id)
+        extension = "zip" if data.startswith(b"PK") else "json"
+        return Response(
+            data, media_type=f"application/{extension}",
+            headers={"Content-Disposition": f'attachment; filename="SalesTrackr-{backup_id}.{extension}"'},
+        )
+
+    async def recovery_input(request):
+        manager = require_recovery()
+        manager.require_admin(request.state.actor)
+        if request.headers.get("content-type", "").split(";")[0] == "application/zip":
+            return await request.body(), None, {}
+        try:
+            body = await request.json()
+            data, row = await run_in_threadpool(manager.get, body.get("backupId"))
+            return data, row, body
+        except (ValueError, AttributeError, TypeError):
+            raise Problem(
+                "Select a saved backup or upload a backup file.", 422, "invalid_backup",
+            ) from None
+
+    @app.post("/api/backups/inspect")
+    async def inspect_backup(request: Request):
+        data, row, _ = await recovery_input(request)
+        return await run_in_threadpool(
+            require_recovery().inspect, data, request.state.actor, row,
+        )
+
+    @app.post("/api/backups/restore")
+    async def restore_backup(request: Request):
+        if request.headers.get("content-type", "").split(";")[0] != "application/zip":
+            try:
+                body = await request.json()
+                result = await run_in_threadpool(
+                    require_recovery().completed_restore, body.get("backupId"), body.get("writeId"),
+                    request.state.actor, body.get("confirmation"),
+                )
+                if result:
+                    return result
+            except (ValueError, AttributeError, TypeError):
+                raise Problem(
+                    "Select a saved backup or upload a backup file.", 422, "invalid_backup",
+                ) from None
+        data, _, body = await recovery_input(request)
+        return await run_in_threadpool(
+            require_recovery().restore, data, request.state.actor,
+            body.get("previewToken") or request.headers.get("x-salestrackr-restore-token", ""),
+            body.get("confirmation") or request.headers.get("x-salestrackr-restore-confirm", ""),
+            body.get("writeId") or request.headers.get("x-salestrackr-write-id"),
+        )
 
     @app.post("/api/writes/prepare")
-    def prepare(body: Prepare):
+    def prepare(body: Prepare, request: Request):
         with save_timing(body.entityType, "prepare"), timed_lock(repo.lock):
             with timed_phase("syncBeforeMs"):
                 repo.sync()
+            if indexed:
+                repo.check_generation(request.headers.get("x-salestrackr-generation"))
             if body.entityId:
                 # Preparation is also permitted for a record awaiting conflict resolution.
-                if body.entityId not in repo.heads:
+                if not (repo.exists(body.entityId) if indexed else body.entityId in repo.heads):
                     raise Problem("Record not found.", 404, "not_found")
             return {"writeId": uuid4().hex, "entityId": body.entityId or repo.backend.allocate()}
 
@@ -236,6 +380,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     def accounts(search: str = "", offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
         with repo.lock:
             repo.sync()
+            if indexed:
+                return {**repo.query_accounts(search, offset, limit), **metadata()}
             rows = sorted(
                 (r for r in repo.list("account") if search.casefold() in r["data"]["name"].casefold()),
                 key=lambda r: r["data"]["name"].casefold(),
@@ -252,7 +398,10 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             repo.sync()
             return {
                 "name": name.strip(),
-                **account_matches(repo.head_data.values(), name.strip(), exclude=exclude),
+                **(
+                    repo.matching_accounts(name.strip(), exclude) if indexed
+                    else account_matches(repo.head_data.values(), name.strip(), exclude=exclude)
+                ),
                 **metadata(),
             }
 
@@ -266,7 +415,10 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         with repo.lock:
             repo.sync()
             return {
-                "items": [r for r in repo.list("contact") if r["data"]["accountId"] == accountId],
+                "items": (
+                    repo.query_contacts(accountId) if indexed
+                    else [r for r in repo.list("contact") if r["data"]["accountId"] == accountId]
+                ),
                 **metadata(),
             }
 
@@ -294,6 +446,13 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     ):
         with repo.lock:
             repo.sync()
+            if indexed:
+                return {
+                    **repo.query_records(
+                        view, search, accountId, stage, dateBasis, start, end, due, offset, limit,
+                    ),
+                    **metadata(),
+                }
             account_data = {r["entityId"]: r["data"] for r in repo.list("account")}
             return {
                 **query_records(
@@ -416,6 +575,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     def dashboard():
         with repo.lock:
             repo.sync()
+            if indexed:
+                return {"counts": repo.control["dashboard"], **metadata()}
             rows = repo.list("record")
             counts = {view: sum(matches(r["data"], view) for r in rows) for view in VIEWS}
             return {"counts": counts, **metadata()}
@@ -430,6 +591,12 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     def resolve(kind: str, entity_id: str, body: Resolution, request: Request):
         require_kind(kind)
         with save_timing(kind, "resolve_conflict"), timed_lock(repo.lock):
+            if indexed:
+                result = repo.resolve(
+                    kind, entity_id, body, request.state.actor,
+                    request.headers.get("x-salestrackr-generation"),
+                )
+                return {**result, **metadata()}
             with timed_phase("syncBeforeMs"):
                 repo.sync(force=True)
             fingerprint = digest(
@@ -474,6 +641,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         require_kind(kind)
         with repo.lock:
             repo.sync()
+            if indexed:
+                return {**repo.history_page(entity_id, kind, offset, limit), **metadata()}
             entries = repo.history(entity_id)
             if not entries or entries[0]["entityType"] != kind:
                 raise Problem("Record not found.", 404, "not_found")
