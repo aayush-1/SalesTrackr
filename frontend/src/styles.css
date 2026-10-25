@@ -1775,6 +1775,7 @@ th {
 }
 .settings-tabs {
   display: flex;
+  overflow-x: auto;
   gap: 8px;
   border-bottom: 1px solid #dce2dc;
   margin-bottom: 22px;
@@ -1839,6 +1840,32 @@ th {
 .restore-preview>.field {
   max-width: 400px;
   margin: 18px 0;
+}
+.cleanup-toolbar,.cleanup-select-all {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cleanup-toolbar {
+  flex-wrap: wrap;
+  padding: 18px 0;
+}
+.cleanup-toolbar .actions {
+  margin-left: auto;
+}
+.cleanup-select-all input,.cleanup-table input[type=checkbox] {
+  width: 18px;
+  height: 18px;
+  accent-color: #256550;
+}
+.cleanup-select-all {
+  cursor: pointer;
+}
+.cleanup-table th:first-child,.cleanup-table td:first-child {
+  width: 44px;
+}
+.cleanup-selected {
+  background: #f0f7f2;
 }
 @media(max-width:760px) {
   .settings-tabs button {

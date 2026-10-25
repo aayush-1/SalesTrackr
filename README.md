@@ -19,7 +19,10 @@ A private sales workspace: one customer account, one record per enquiry, and a d
 - **Discard record** works at any stage, including Closed, and requires a remark. Discarded records become read-only and remain in **Discarded** and **All sales records**, but leave stage/payment queues and their counts. The discard date, remark, original stage/payment state, and history are retained; nothing is deleted.
 - React/TypeScript UI, FastAPI backend, a local demo, Drive storage adapter, and a Cloud Run Dockerfile.
 - An opt-in Firestore backend and **Settings -> Backup and recovery** local preview, with verified
-  plain ZIP backups, three-copy rotation, and full-workspace recovery.
+  plain ZIP backups, ten-copy rotation, and full-workspace recovery.
+- **Settings -> Record cleanup** lets recovery administrators permanently delete discarded records
+  or closed records with feedback received, including their saved history. Accounts, contacts and
+  existing backups are preserved; deletion requires selecting records and typing `DELETE`.
 
 **Received** confirms payment and automatically closes an already-delivered sale. Before delivery it records receipt without skipping dispatch/delivery; after delivery, close the sale with Received or the final stage action. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
 
@@ -105,7 +108,7 @@ backup folder, not uploads to Google Drive. They survive a server restart; the e
 ephemeral. Weekly preferences can be reviewed locally, but no cloud schedule is running.
 Settings is the small gear beside **Sales workspace** at the bottom of the sidebar. New ZIP backups
 contain readable `accounts.json`, `contacts.json`, `sales-records.json` and a verified manifest, with
-current data and full history. Keep only three backups total, with no protected-original exception.
+current data and full history. Keep only ten backups total, with no protected-original exception.
 Production lists valid accessible archives from the private Drive backup folder; local preview
 uses its isolated sample backup folder instead.
 Production requires `BACKUP_DRIVE_FOLDER_ID` for the separately marked Firestore backup folder.

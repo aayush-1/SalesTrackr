@@ -163,8 +163,10 @@ class FirestoreRepository:
                 if pending and pending.get("expires", float("inf")) <= time.time():
                     control = {
                         **control, "maintenance": None,
-                        "lastBackupError": (
-                            "An interrupted restore expired; the existing live data was retained."
+                        ("lastCleanupError" if pending.get("kind") == "cleanup" else "lastBackupError"): (
+                            "An interrupted cleanup expired. Resume it from Settings."
+                            if pending.get("kind") == "cleanup"
+                            else "An interrupted restore expired; the existing live data was retained."
                         ),
                     }
                     transaction.set(self.workspace, control)
@@ -450,6 +452,12 @@ class FirestoreRepository:
                 self._check_prior(prior, revision["fingerprint"], revision["actor"], revision["entityId"])
                 return prior, control, None
             old = entity_ref.get(transaction=transaction).to_dict()
+            if revision["entityType"] == "record":
+                removed = namespace.collection("recordDeletions").document(revision["entityId"]).get(
+                    transaction=transaction
+                )
+                if removed.exists:
+                    raise Problem("This sales record was permanently deleted.", 409, "record_deleted")
             if old and old["kind"] != revision["entityType"]:
                 raise Problem("That identifier belongs to another entity type.", 409, "record_exists")
             if set(old["heads"] if old else []) != set(revision["parents"]):
@@ -667,7 +675,16 @@ class FirestoreRepository:
             before = self.workspace.get().to_dict()
             namespace = self.workspace.collection("datasets").document(before["activeDataset"])
             entries = [item.to_dict() for item in namespace.collection("revisions").stream()]
-            revisions = self._payloads(entries)
+            removed = {item.id for item in namespace.collection("recordDeletions").stream()}
+            try:
+                revisions = self._payloads([entry for entry in entries if entry["entityId"] not in removed])
+            except Problem as error:
+                changed = self.workspace.get().to_dict()
+                if error.code in ("data_removed", "data_altered") and any(
+                    before[key] != changed[key] for key in ("activeDataset", "generation", "sequence")
+                ):
+                    continue
+                raise
             after = self.workspace.get().to_dict()
             if all(before[key] == after[key] for key in ("activeDataset", "generation", "sequence")):
                 return revisions, before

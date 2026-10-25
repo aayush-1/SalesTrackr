@@ -9,7 +9,7 @@ const manual: Backup = { ...original, id: 'manual', name: 'manual-backup.zip', s
 const settings = (patch: Partial<BackupSettings> = {}): BackupSettings => ({
   mode: 'demo', storageBackend: 'firestore', location: 'Local simulated backup folder', folderUrl: null,
   schedule: { enabled: false, active: false, weekday: 'Sunday', time: '02:00', timezone: 'Asia/Kolkata' },
-  retention: 3, backups: [original], lastBackupAt: original.createdAt, lastError: null,
+  retention: 10, backups: [original], lastBackupAt: original.createdAt, lastError: null,
   canBackup: true, canRestore: true, generation: 'generation-one', ...patch,
 });
 const preview = (backup = original, patch = {}) => ({
@@ -68,7 +68,7 @@ test('lower-left Settings navigation, tabs, mobile navigation and honest local s
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test('manual readable backup, Drive discovery, three total copies and weekly preference', async ({ page }) => {
+test('manual readable backup, Drive discovery, ten total copies and weekly preference', async ({ page }) => {
   const mock = await mockWorkspace(page, { mode: 'production', location: 'Private Drive folder', folderUrl: 'https://drive.google.com/drive/folders/private' });
   await page.goto('/settings');
   await expect(page.getByRole('link', { name: 'Open private Drive folder' })).toHaveAttribute('href', mock.state.folderUrl!);
@@ -87,7 +87,7 @@ test('manual readable backup, Drive discovery, three total copies and weekly pre
   await page.getByLabel('Enable weekly backups').check();
   await expect(page.getByText('Weekly schedule preference saved.', { exact: false })).toBeVisible();
   expect(mock.state.schedule.enabled).toBe(true);
-  await expect(page.getByText('Keep only the 3 newest backups in total', { exact: false })).toBeVisible();
+  await expect(page.getByText('Keep only the 10 newest backups in total', { exact: false })).toBeVisible();
 });
 
 test('backup double clicks and interrupted response keep one exact operation ID', async ({ page }) => {

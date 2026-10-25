@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { Alert, Field, Loading, PageHeader } from '../components';
 import type { Backup, BackupPreview, BackupSettings } from '../types';
+import { RecordCleanup } from './record-cleanup';
 
 const maxArchiveSize = 64 * 1024 * 1024;
 type RestoreAttempt = { writeId: string; preview: BackupPreview; backupId: string; file: File | null };
@@ -35,7 +36,7 @@ function BackupSummary({ backup }: { backup: Backup }) {
 
 export function Settings() {
   const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') === 'general' ? 'general' : 'backup';
+  const tab = params.get('tab') === 'general' ? 'general' : params.get('tab') === 'cleanup' ? 'cleanup' : 'backup';
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -55,7 +56,9 @@ export function Settings() {
     <div className="settings-tabs" role="tablist" aria-label="Settings sections">
       <button role="tab" id="general-tab" aria-controls="general-panel" aria-selected={tab === 'general'} onClick={() => setParams({ tab: 'general' })}>General</button>
       <button role="tab" id="backup-tab" aria-controls="backup-panel" aria-selected={tab === 'backup'} onClick={() => setParams({ tab: 'backup' })}>Backup and recovery</button>
+      <button role="tab" id="cleanup-tab" aria-controls="cleanup-panel" aria-selected={tab === 'cleanup'} onClick={() => setParams({ tab: 'cleanup' })}>Record cleanup</button>
     </div>
+    {tab === 'cleanup' && <div role="tabpanel" id="cleanup-panel" aria-labelledby="cleanup-tab"><RecordCleanup demo={settings?.mode === 'demo'} /></div>}
     {loadError && <Alert>{loadError} Retry using Refresh backup status. Loading status does not start a backup or restore.</Alert>}
     {loading && !settings && <Loading />}
     {settings && <>
@@ -216,7 +219,7 @@ function BackupRecovery({ settings, onSettings }: { settings: BackupSettings; on
     </section>
     <section className="panel details-panel settings-section" aria-label="Weekly backups">
       <h2>Weekly backups</h2>
-      <p>Sunday at 02:00 Asia/Kolkata (IST). Keep only the 3 newest backups in total, including manual, weekly, migration and pre-restore copies. There is no protected exception. With weekly backups only, these cover the last 3 weeks; additional backups rotate older copies out sooner.</p>
+      <p>Sunday at 02:00 Asia/Kolkata (IST). Keep only the {settings.retention} newest backups in total, including manual, weekly, migration and pre-restore copies. There is no protected exception. With weekly backups only, these cover the last {settings.retention} weeks; additional backups rotate older copies out sooner.</p>
       <label className="schedule-toggle"><input type="checkbox" checked={weeklyEnabled} disabled={locked || disabled || !settings.canRestore}
         onChange={event => void saveSchedule(event.target.checked)} /><span>Enable weekly backups</span></label>
       <p className="help-text">{demo ? 'This saves a local preference only. No cloud scheduler is running in the demo.'

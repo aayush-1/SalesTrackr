@@ -190,10 +190,10 @@ reported as unsuccessful rather than mixing versions.
 
 A completed upload is downloaded and checked before it is catalogued as verified or older copies are
 pruned. Manual/job operation IDs and preallocated destination IDs survive unknown responses; a retry
-reconciles the same file instead of creating another backup. Keep exactly the newest three backups
+reconciles the same file instead of creating another backup. Keep exactly the newest ten backups
 in total, including migration, manual, scheduled and pre-restore copies; none is permanently protected.
 Old files go to recoverable Drive Trash (and remain subject to Drive's Trash storage/expiry policy).
-With only weekly backups this covers three weeks; manual/recovery copies rotate older weeks sooner.
+With only weekly backups this covers ten weeks; manual/recovery copies rotate older weeks sooner.
 Verification failure never prunes the valid existing copies.
 
 Available backups are reconciled against the actual private provider folder. Previously verified
@@ -239,6 +239,33 @@ keys, encryption, unsupported formats, altered hashes, invalid models, broken an
 version IDs are rejected before activation. Files are never extracted to arbitrary filesystem paths.
 Large recovery jobs must fit the service request/memory budget; these limits fail explicitly rather
 than truncating a backup. Archived datasets/payloads are deliberately not garbage-collected automatically.
+
+### Explicit record cleanup
+
+Settings -> Record cleanup lists only discarded sales records or closed sales records with feedback
+received. Recovery administrators can select individual rows or all rows and must type `DELETE`.
+The server rechecks every selected current revision and eligibility before beginning; active,
+feedback-pending, conflicting, stale, account and contact selections cannot be removed.
+
+Cleanup is permanent, not a hidden/archive flag: it removes the selected record's entity indexes,
+revision metadata and compressed payloads, including historical copies in older Firestore datasets.
+Accounts, contacts, unrelated sales and existing Drive backups are unchanged. Backups can still
+contain the deleted records; recovering them requires a full-workspace restore. No automatic backup
+is created by cleanup, so create a current backup first when recovery may be needed.
+
+Persistent operation IDs, small deletion receipts and bounded, transactionally fenced payload
+deletes make interrupted operations restartable without double-counting. A maintenance lease
+blocks saves while deleting, and a pending-cleanup marker blocks restores until cleanup completes.
+Snapshots omit records already marked for deletion even if physical removal is interrupted.
+Old forms cannot recreate a deleted record within the same dataset. A later deliberate backup
+restore uses a new dataset and can bring those records back. This reclaims database storage,
+not Cloud Run's configured RAM.
+
+After an explicitly approved retirement of legacy Drive storage, `verify-live` accepts the missing
+source only with a completed `sourceRetirements` receipt bound to the original migration data and
+inventory hashes. It still verifies original revisions against live data, except sales records
+with completed intentional-deletion receipts. The parent Drive root and dedicated Firestore backup
+folder must remain; ordinary backups do not depend on legacy settings or data folders.
 
 ### Recovery without the original app
 
