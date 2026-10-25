@@ -13,5 +13,8 @@
 !backend/__init__.py
 !backend/app/
 !backend/app/**
+!scripts/
+!scripts/drive_admin.py
+!scripts/firestore_admin.py
 **/__pycache__/
 **/*.pyc

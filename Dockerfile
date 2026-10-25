@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY backend/ ./backend/
 COPY scripts/ ./scripts/
 COPY --from=frontend /build/dist ./frontend/dist/
+RUN python -c "import backend.app.main; import scripts.firestore_admin"
 USER appuser
 EXPOSE 8080
 CMD ["sh", "-c", "exec python -m uvicorn backend.app.main:create_app --factory --host 0.0.0.0 --port ${PORT} --workers 1 --no-access-log"]
