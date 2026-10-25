@@ -27,7 +27,7 @@ from backend.app.domain import (
     today,
 )
 from backend.app.main import create_app
-from backend.app.queries import VIEWS, query_records
+from backend.app.queries import VIEWS, account_matches, account_name_key, query_records
 from backend.app.storage import LocalBackend, Repository, digest
 
 HEADERS = {"X-SalesTrackr-Request": "1"}
@@ -77,6 +77,113 @@ def advance(client, revision, stage, **extra):
     )
     assert response.status_code == 200, response.text
     return response.json()["revision"]
+
+
+@pytest.mark.parametrize("name", [
+    "GM offset", "g.m. OFFSET", "G-M_Offset", " G  M  Offset ",
+    "\uff27\uff2d Offset", "G\u00a0M Offset",
+])
+def test_new_account_rejects_format_only_duplicates_without_writing(client, name):
+    original, _ = write(client, "account", {"name": "G M Offset", "address": "Synthetic city"})
+    assert original.status_code == 200
+    storage = client.app.state.repo.backend
+    files = {path.name for path in storage.directory.glob("*.json")}
+    matches = client.get("/api/accounts/matches", params={"name": name}).json()
+    assert matches["exactCount"] == 1
+    assert matches["items"][0]["match"] == "exact"
+    assert matches["items"][0]["revision"] == original.json()["revision"]
+    duplicate, _ = write(client, "account", {"name": name, "address": "Different location"})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "account_exists"
+    assert {path.name for path in storage.directory.glob("*.json")} == files
+    assert len(storage.revisions(original.json()["revision"]["entityId"])) == 1
+
+
+def test_account_matches_rank_deduplicate_and_exclude_conflict_heads():
+    def row(name, entity=None):
+        return {
+            "id": uuid4().hex, "entityId": entity or uuid4().hex, "entityType": "account",
+            "data": {"name": name},
+        }
+
+    exact = row("G M Offset")
+    typo = row("GM Ofset")
+    prefix = row("GM Offset Printers")
+    unrelated = row("Northstar Packaging")
+    second_head = row("GM Offset Pvt Ltd", exact["entityId"])
+    result = account_matches([typo, prefix, unrelated, exact, second_head], "GM offset")
+    assert result["exactCount"] == 1 and result["total"] == 3
+    assert result["items"][0]["revision"] == exact
+    assert result["items"][0]["conflicted"] is True
+    assert all(match["match"] == "similar" for match in result["items"][1:])
+    assert account_matches([exact, second_head], "GM offset", exclude=exact["entityId"])["total"] == 0
+    assert account_matches([exact], "GM")["total"] == 0
+    assert account_matches([exact], " ")["total"] == 0
+    assert account_matches([row("!!!")], "???")["total"] == 0
+    assert account_name_key("!!!") == "!!!"
+    assert account_name_key("Stra\u00dfe") == account_name_key("STRASSE")
+    many = [row(f"G{'.' * number}M Offset") for number in range(7)]
+    limited = account_matches(many, "GM offset", limit=2)
+    assert limited["total"] == limited["exactCount"] == 7
+    assert len(limited["items"]) == 2
+    assert limited == account_matches(reversed(many), "GM offset", limit=2)
+
+
+def test_account_suggestions_do_not_force_sync_or_read_history(client):
+    original, body = write(client, "account", {"name": "G M Offset"})
+    repo = client.app.state.repo
+    with patch.object(repo, "sync", wraps=repo.sync) as sync:
+        with patch.object(repo, "read_history", wraps=repo.read_history) as history:
+            response = client.get("/api/accounts/matches", params={"name": "GM Ofset"})
+            assert response.status_code == 200
+            assert response.json()["items"][0]["match"] == "similar"
+            sync.assert_called_once_with()
+            history.assert_not_called()
+    retry = client.post("/api/accounts", json=body, headers=HEADERS)
+    assert retry.status_code == 200 and retry.json()["revision"] == original.json()["revision"]
+    assert client.get("/api/accounts/matches", params={"name": "x" * 201}).status_code == 422
+
+
+def test_duplicate_created_after_lookup_is_rejected_after_fresh_sync(client):
+    ticket = prepare(client, "account")
+    assert client.get("/api/accounts/matches", params={"name": "GM offset"}).json()["total"] == 0
+    repo = client.app.state.repo
+    external = Repository(LocalBackend(repo.backend.directory))
+    external.sync()
+    created = revision("account", uuid4().hex, AccountData(name="G M Offset").model_dump(mode="json"))
+    external.commit(created)
+    response, _ = write(client, "account", {"name": "GM offset"}, ticket=ticket)
+    assert response.status_code == 409 and response.json()["error"]["code"] == "account_exists"
+    assert repo.list("account") == [created]
+    assert len(list(repo.backend.directory.glob("*.json"))) == 1
+
+
+def test_similar_companies_can_be_created_and_existing_names_remain_editable(client):
+    original, _ = write(client, "account", {"name": "G M Offset"})
+    similar, _ = write(client, "account", {"name": "GM Ofset"})
+    assert similar.status_code == 200
+    first = original.json()["revision"]
+    changed, _ = write(
+        client, "account", {"name": "G M Offset", "address": "Updated address"},
+        f"/api/accounts/{first['entityId']}", first, method="PATCH",
+    )
+    assert changed.status_code == 200 and changed.json()["warning"] is None
+    assert len(client.app.state.repo.read_history(first["entityId"])) == 2
+
+
+def test_normalized_collision_on_rename_keeps_existing_warning_and_history(client):
+    first, _ = write(client, "account", {"name": "G M Offset"})
+    second, _ = write(client, "account", {"name": "Separate company"})
+    current = second.json()["revision"]
+    changed, _ = write(
+        client, "account", {"name": "GM offset"},
+        f"/api/accounts/{current['entityId']}", current, method="PATCH",
+    )
+    assert changed.status_code == 200
+    assert "same name" in changed.json()["warning"]
+    assert len(client.app.state.repo.read_history(current["entityId"])) == 2
+    assert client.get("/api/accounts/matches", params={"name": "G.M. Offset"}).json()["exactCount"] == 2
+    assert client.get(f"/api/entities/account/{first.json()['revision']['entityId']}").status_code == 200
 
 
 def test_record_detail_bundles_linked_data_with_one_synchronization(client):

@@ -73,6 +73,7 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
   const { refresh } = useContext(RefreshContext);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState('');
   const ticket = useRef<{ key: string; writeId: string; entityId: string } | null>(null);
   const inFlight = useRef(false);
   const save = useCallback(async (path: string, data: unknown, method = 'POST') => {
@@ -80,6 +81,7 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
     inFlight.current = true;
     setBusy(true);
     setError('');
+    setErrorCode('');
     const key = JSON.stringify({ path, data, baseRevision, method });
     try {
       if (ticket.current && ticket.current.key !== key) {
@@ -104,10 +106,11 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
     } catch (e) {
       if (e instanceof ApiError && e.status < 500) ticket.current = null;
       setError(e instanceof Error ? e.message : 'Save failed.');
+      setErrorCode(e instanceof ApiError ? e.code : '');
       return null;
     } finally { inFlight.current = false; setBusy(false); }
   }, [kind, entityId, baseRevision, refresh]);
-  return { save, busy, error, setError };
+  return { save, busy, error, setError, errorCode, unconfirmed: ticket.current !== null };
 }
 
 export async function allAccounts<T>(signal: AbortSignal): Promise<Revision<T>[]> {

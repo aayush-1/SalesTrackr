@@ -26,8 +26,10 @@ export function Field({ label, children, hint, wide = false }: {
       ? cloneElement(children, { id, 'aria-describedby': hint ? `${id}-hint` : undefined }) : children}
     {hint && <small id={`${id}-hint`}>{hint}</small>}</div>;
 }
-export function SaveButton({ busy, children = 'Save changes' }: { busy: boolean; children?: ReactNode }) {
-  return <button className="button primary" type="submit" disabled={busy}>
+export function SaveButton({ busy, disabled = false, children = 'Save changes' }: {
+  busy: boolean; disabled?: boolean; children?: ReactNode;
+}) {
+  return <button className="button primary" type="submit" disabled={busy || disabled}>
     {busy ? <LoaderCircle size={16} className="spin" /> : <Check size={16} />}{busy ? 'Saving...' : children}
   </button>;
 }
