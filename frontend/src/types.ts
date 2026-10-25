@@ -24,6 +24,8 @@ export interface SalesRecord {
   paymentReceived: boolean;
   paymentReceivedOn: string | null;
   paymentNote: string;
+  feedbackReceived?: boolean;
+  feedbackReceivedOn?: string | null;
   nextFollowUpOn: string | null;
   followUps: { id: string; note: string; occurredOn: string; recordedAt: string }[];
 }
@@ -49,6 +51,7 @@ export const views: Record<string, { title: string; description: string; stages:
   closed: { title: 'Closed', description: 'Delivered, payment received, and complete.', stages: ['closed'] },
   pending: { title: 'Payment pending', description: 'All outstanding confirmed orders, including older and delivered orders.', stages: stages.slice(2, 5) },
   paid: { title: 'Payment received', description: 'Orders with payment receipt confirmed.', stages: stages.slice(2) },
+  'feedback-pending': { title: 'Feedback pending', description: 'Closed sales records awaiting feedback. Confirm feedback receipt on the record to remove it from this list.', stages: ['closed'] },
   discarded: { title: 'Discarded', description: 'Records set aside with a remark. Original stages and history are retained.', stages },
 };
 export function currentStageDates(data: SalesRecord): Partial<Record<Stage, string>> {

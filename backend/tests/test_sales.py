@@ -9,6 +9,7 @@ from backend.app.config import Settings
 from backend.app.domain import (
     STAGES,
     AccountData,
+    FeedbackChange,
     FollowUp,
     PaymentChange,
     Problem,
@@ -16,6 +17,7 @@ from backend.app.domain import (
     Revision,
     StageChange,
     add_followup,
+    feedback_change,
     now,
     payment_change,
     record_stage,
@@ -144,6 +146,121 @@ def test_receipt_closes_delivered_sale_and_is_retry_safe(client):
     assert "closed" not in history[1]["data"]["stageDates"]
 
 
+def test_feedback_receipt_queue_retry_history_and_reopening(client):
+    row = new_sale(client)
+    route = f"/api/records/{row['entityId']}/feedback"
+    assert row["data"]["feedbackReceived"] is False
+    assert row["data"]["feedbackReceivedOn"] is None
+    for invalid in ({}, {"received": True}, {"received": False}):
+        rejected, _ = write(client, "record", invalid, route, row)
+        assert rejected.status_code == 422
+    for stage in STAGES[1:5]:
+        row = advance(client, row, stage)
+        assert client.get("/api/records?view=feedback-pending").json()["total"] == 0
+    rejected, _ = write(client, "record", {"received": True}, route, row)
+    assert rejected.status_code == 422
+    response, _ = write(client, "record", {"received": True}, route.replace("/feedback", "/payment"), row)
+    assert response.status_code == 200, response.text
+    closed = response.json()["revision"]
+    pending = client.get("/api/records?view=feedback-pending").json()
+    assert [item["entityId"] for item in pending["items"]] == [closed["entityId"]]
+    assert client.get("/api/dashboard").json()["counts"]["feedback-pending"] == 1
+    response, body = write(client, "record", {"received": True}, route, closed)
+    assert response.status_code == 200, response.text
+    received = response.json()["revision"]
+    assert received["action"] == "feedback"
+    assert received["data"] == {
+        **closed["data"], "feedbackReceived": True, "feedbackReceivedOn": today().isoformat()
+    }
+    retry = client.post(route, json=body, headers=HEADERS)
+    assert retry.status_code == 200 and retry.json()["revision"] == received
+    stale, _ = write(client, "record", {"received": False}, route, closed)
+    assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_edit"
+    assert client.get("/api/records?view=feedback-pending").json()["total"] == 0
+    counts = client.get("/api/dashboard").json()["counts"]
+    assert counts["feedback-pending"] == 0 and counts["closed"] == counts["paid"] == 1
+    history = client.get(f"/api/entities/record/{row['entityId']}/history").json()["items"]
+    assert history[0] == received and history[1] == closed
+    recovered = Repository(client.app.state.repo.backend)
+    recovered.sync(force=True)
+    assert recovered.current(row["entityId"]) == received
+    reopened, _ = write(
+        client, "record", {"stage": "delivered", "reason": "Correct closure"},
+        route.replace("/feedback", "/stage"), received,
+    )
+    assert reopened.status_code == 422
+    assert "Undo feedback" in reopened.json()["error"]["message"]
+    response, _ = write(client, "record", {"received": False}, route, received)
+    assert response.status_code == 200, response.text
+    undone = response.json()["revision"]
+    assert undone["data"]["feedbackReceived"] is False
+    assert undone["data"]["feedbackReceivedOn"] is None
+    assert client.get("/api/records?view=feedback-pending").json()["total"] == 1
+    reopened = advance(client, undone, "delivered", reason="Correct closure")
+    assert client.get("/api/records?view=feedback-pending").json()["total"] == 0
+    advance(client, reopened, "closed")
+    assert client.get("/api/records?view=feedback-pending").json()["total"] == 1
+
+
+@pytest.mark.parametrize("stage_index", range(5))
+def test_feedback_requires_closure(stage_index):
+    for received in (False, True):
+        with pytest.raises(Problem, match="Close the sales record"):
+            feedback_change(record_at(stage_index), FeedbackChange(received=received))
+
+
+def test_feedback_dates_and_legacy_records():
+    closed = record_at(5, True)
+    legacy = closed.model_dump(mode="json", exclude={"feedbackReceived", "feedbackReceivedOn"})
+    normalized = RecordData.model_validate(legacy)
+    assert not normalized.feedbackReceived and normalized.feedbackReceivedOn is None
+    assert query_records([{"entityId": uuid4().hex, "data": legacy}], {}, "feedback-pending")["total"] == 1
+    old_date = closed.stageDates["closed"]
+    received = RecordData.model_validate({
+        **closed.model_dump(), "feedbackReceived": True, "feedbackReceivedOn": old_date
+    })
+    assert feedback_change(received, FeedbackChange(received=True)).feedbackReceivedOn == old_date
+    assert feedback_change(received, FeedbackChange(received=False)).feedbackReceivedOn is None
+    invalid_cases = [
+        {**closed.model_dump(), "feedbackReceived": True},
+        {**closed.model_dump(), "feedbackReceivedOn": today()},
+        {**closed.model_dump(), "feedbackReceived": True, "feedbackReceivedOn": old_date - timedelta(days=1)},
+        {**closed.model_dump(), "feedbackReceived": True, "feedbackReceivedOn": today() + timedelta(days=1)},
+        {**record_at(4).model_dump(), "feedbackReceived": True, "feedbackReceivedOn": today()},
+    ]
+    for data in invalid_cases:
+        with pytest.raises(ValidationError, match="Feedback|feedback"):
+            RecordData.model_validate(data)
+    with pytest.raises(ValidationError, match="Feedback date"):
+        stage_change(received, StageChange(stage="closed", occurredOn=today(), reason="Correct date"))
+
+
+def test_feedback_cannot_bypass_action_and_is_retained_on_discard(client):
+    row = new_sale(client)
+    for key, value in (("feedbackReceived", True), ("feedbackReceivedOn", today().isoformat())):
+        rejected, _ = write(
+            client, "record", {"accountId": row["data"]["accountId"], key: value},
+            f"/api/records/{row['entityId']}", row, method="PATCH",
+        )
+        assert rejected.status_code == 422
+    for stage in STAGES[1:5]:
+        row = advance(client, row, stage)
+    for suffix in ("payment", "feedback"):
+        response, _ = write(
+            client, "record", {"received": True}, f"/api/records/{row['entityId']}/{suffix}", row
+        )
+        assert response.status_code == 200, response.text
+        row = response.json()["revision"]
+    response, _ = write(
+        client, "record", {"reason": "Archived duplicate"}, f"/api/records/{row['entityId']}/discard", row,
+    )
+    assert response.status_code == 200, response.text
+    discarded = response.json()["revision"]
+    assert discarded["data"]["feedbackReceived"] is True
+    assert discarded["data"]["feedbackReceivedOn"] == row["data"]["feedbackReceivedOn"]
+    assert client.get("/api/records?view=feedback-pending").json()["total"] == 0
+
+
 @pytest.mark.parametrize("stage_index", range(7))
 @pytest.mark.parametrize("workflow_version", [1, 2])
 def test_legacy_workflow_and_financial_history_remain_readable(tmp_path, stage_index, workflow_version):
@@ -159,7 +276,7 @@ def test_legacy_workflow_and_financial_history_remain_readable(tmp_path, stage_i
     if workflow_version == 2:
         old_stages[1:3] = ["quotation_sent", "follow_up"]
     data = record_at(0).model_dump(mode="json")
-    for key in ("discarded", "discardNote", "discardedOn"):
+    for key in ("discarded", "discardNote", "discardedOn", "feedbackReceived", "feedbackReceivedOn"):
         data.pop(key)
     if workflow_version == 1:
         data.pop("workflowVersion")
@@ -381,6 +498,7 @@ def test_stage_tabs_and_dashboard_use_only_current_status(client):
         "closed": [5],
         "pending": [2, 3, 4],
         "paid": [5, 6],
+        "feedback-pending": [5],
         "discarded": [],
     }
     assert set(counts) == set(expected)
@@ -584,6 +702,7 @@ def test_discard_at_any_stage_keeps_history_and_exits_queues(client, stage_index
         ("/product-notes", {"productNotes": "After discard"}, "PATCH"),
         ("/stage", {"stage": "new_lead", "reason": "Correction"}, "POST"),
         ("/payment", {"note": "After discard"}, "POST"),
+        ("/feedback", {"received": True}, "POST"),
         ("/followups", {"note": "After discard"}, "POST"),
         ("/discard", {"reason": "Again"}, "POST"),
     ]
@@ -801,6 +920,7 @@ def test_date_views_do_not_hide_older_unpaid_orders():
         ("closed", 5, True),
         ("pending", 4, False),
         ("paid", 3, True),
+        ("feedback-pending", 5, True),
         ("discarded", 1, False),
     ],
 )

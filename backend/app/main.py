@@ -18,6 +18,7 @@ from .domain import (
     AccountData,
     ContactData,
     DiscardChange,
+    FeedbackChange,
     FollowUp,
     NewRecord,
     PaymentChange,
@@ -32,6 +33,7 @@ from .domain import (
     Write,
     add_followup,
     discard_record,
+    feedback_change,
     now,
     payment_change,
     stage_change,
@@ -345,6 +347,17 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             "followup",
             request,
             lambda old: add_followup(RecordData.model_validate(old), body.data),
+        )
+
+    @app.post("/api/records/{entity_id}/feedback")
+    def feedback(entity_id: str, body: Write[FeedbackChange], request: Request):
+        require_id(entity_id, body.entityId)
+        return mutate(
+            "record",
+            body,
+            "feedback",
+            request,
+            lambda old: feedback_change(RecordData.model_validate(old), body.data),
         )
 
     @app.get("/api/dashboard")
