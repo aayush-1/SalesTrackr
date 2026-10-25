@@ -1,4 +1,6 @@
 from datetime import date
+from difflib import SequenceMatcher
+from unicodedata import normalize
 
 from .domain import STAGES, Problem, record_stage, today
 
@@ -15,6 +17,50 @@ VIEWS = {
     "feedback-pending": "Feedback pending",
     "discarded": "Discarded",
 }
+
+
+def account_name_key(name):
+    folded = normalize("NFKC", name).casefold()
+    return "".join(character for character in folded if character.isalnum()) or folded.strip()
+
+
+def account_matches(revisions, name, exclude=None, limit=5):
+    key = account_name_key(name)
+    if not key:
+        return {"items": [], "total": 0, "exactCount": 0}
+    accounts = {}
+    for revision in revisions:
+        if revision["entityType"] == "account" and revision["entityId"] != exclude:
+            accounts.setdefault(revision["entityId"], []).append(revision)
+    found = []
+    for versions in accounts.values():
+        best = None
+        for revision in versions:
+            other = account_name_key(revision["data"]["name"])
+            exact = key == other
+            shorter, longer = sorted((key, other), key=len)
+            prefix = len(shorter) >= 6 and longer.startswith(shorter) and len(shorter) / len(longer) >= 0.5
+            score = 1.0 if exact else 0.0
+            if not exact and min(len(key), len(other)) >= 4:
+                if 2 * len(shorter) / (len(key) + len(other)) >= 0.84:
+                    score = SequenceMatcher(None, key, other).ratio()
+            if not exact and score < 0.84 and not prefix:
+                continue
+            candidate = {
+                "revision": revision, "match": "exact" if exact else "similar",
+                "conflicted": len(versions) > 1, "score": max(score, 0.84 if prefix else 0),
+            }
+            if best is None or candidate["score"] > best["score"]:
+                best = candidate
+        if best is not None:
+            found.append(best)
+    found.sort(key=lambda match: (
+        -match["score"], match["revision"]["data"]["name"].casefold(), match["revision"]["entityId"],
+    ))
+    return {
+        "items": [{key: value for key, value in match.items() if key != "score"} for match in found[:limit]],
+        "total": len(found), "exactCount": sum(match["match"] == "exact" for match in found),
+    }
 
 
 def matches(data, view):

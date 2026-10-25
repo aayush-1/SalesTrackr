@@ -28,6 +28,14 @@ Drive change replay downloads a repeated file only once for the same reported Dr
 
 Privacy-safe `save_timing` events use the existing Uvicorn error logger hierarchy, so they are visible without enabling access logs. They contain entity type, static action, outcome/error code, total time, lock wait, pre/post synchronization, consistent-read and write timings, Drive API execution count, and confirmed-document reuse count. Timings overlap where one stage contains another; API executions may themselves retry. No names, IDs, actors, request bodies, notes, URLs or credentials are logged.
 
+## Duplicate account checks
+
+Both new-account forms check for existing companies after a short typing debounce. Matching applies Unicode compatibility normalization and case folding, then ignores spaces and punctuation: `G M Offset`, `GM offset` and `G.M. Offset` are the same name. Typo-like and sufficiently long prefix matches are advisory; unrelated short names are not treated as similar. Suggestions include company location and allow reusing an account without creating another file. Similar-but-different companies require an explicit review checkbox before creation.
+
+New-account mutations recheck normalized exact names after the existing forced synchronization, under the repository lock, and reject duplicates before writing. Successful operation retries are recognized before this check, so a lost response cannot turn the original save into a duplicate-name error. Existing accounts remain editable, and name collisions during edits retain the saved warning rather than breaking unrelated updates. Conflict heads participate in suggestions but must be resolved before reuse. These are application-level checks, not a cross-instance unique-name transaction.
+
+Typing checks use the normal read-cache interval, return at most five ranked companies and do not read histories or force a Drive synchronization per keystroke. Failed checks require retry; stale responses are ignored. Account-save retries retain their original operation/body and remain available even if the newly created account now appears in the suggestions.
+
 ## One sales record, many views
 
 Sales records display the linked account's current company name and location/address, not a separate enquiry title. Multiple records for the same company remain separate enquiries; their product notes, acquired dates, and IDs distinguish them. Updating the account updates these display values without rewriting sales history. Legacy titles remain readable in stored revisions, but are not required or edited by the app.

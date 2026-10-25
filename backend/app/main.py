@@ -39,7 +39,7 @@ from .domain import (
     stage_change,
     today,
 )
-from .queries import VIEWS, matches, query_records
+from .queries import VIEWS, account_matches, account_name_key, matches, query_records
 from .storage import DriveBackend, LocalBackend, Repository, digest
 from .timing import save_timing, timed_lock, timed_phase
 
@@ -164,6 +164,18 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 raise Problem("Discarded sales records are read-only.", 409, "discarded_record")
             data = transform(old["data"] if old else None).model_dump(mode="json")
             validate_references(kind, data)
+            if kind == "account" and create:
+                name_key = account_name_key(data["name"])
+                if any(
+                    row["entityType"] == "account"
+                    and account_name_key(row["data"]["name"]) == name_key
+                    for row in repo.head_data.values()
+                ):
+                    raise Problem(
+                        "An account with this company name already exists. "
+                        "Use the existing account instead of creating a duplicate.",
+                        409, "account_exists",
+                    )
             if kind == "contact" and old and old["data"]["accountId"] != data["accountId"]:
                 raise Problem("Contacts cannot be reassigned to another account.")
             if kind == "record" and old and old["data"]["accountId"] != data["accountId"]:
@@ -186,7 +198,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                     r
                     for r in repo.list("account")
                     if r["entityId"] != write.entityId
-                    and r["data"]["name"].casefold() == data["name"].casefold()
+                    and account_name_key(r["data"]["name"]) == account_name_key(data["name"])
                 ]
                 if duplicates:
                     result["warning"] = "Saved. Another account has the same name; check for duplicates."
@@ -233,6 +245,16 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     @app.post("/api/accounts")
     def create_account(body: Write[AccountData], request: Request):
         return mutate("account", body, "create_account", request, lambda _: body.data, create=True)
+
+    @app.get("/api/accounts/matches")
+    def matching_accounts(name: str = Query("", max_length=200), exclude: str | None = None):
+        with repo.lock:
+            repo.sync()
+            return {
+                "name": name.strip(),
+                **account_matches(repo.head_data.values(), name.strip(), exclude=exclude),
+                **metadata(),
+            }
 
     @app.patch("/api/accounts/{entity_id}")
     def edit_account(entity_id: str, body: Write[AccountData], request: Request):

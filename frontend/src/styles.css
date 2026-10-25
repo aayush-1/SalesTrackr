@@ -928,6 +928,55 @@ footer {
   max-width: 400px;
   margin-bottom: 24px;
 }
+.account-duplicate-check:empty {
+  display: none;
+}
+.account-matches {
+  border: 1px solid #e7d9b7;
+  border-radius: 8px;
+  background: #fffcf3;
+  padding: 15px 17px;
+}
+.account-matches>p {
+  margin-top: 4px;
+  font-size: 12px;
+}
+.account-matches ul {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+.account-matches li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  border-top: 1px solid #eee5d0;
+  padding: 11px 0;
+}
+.account-matches li>div {
+  flex: 1;
+  min-width: 140px;
+  overflow-wrap: anywhere;
+}
+.account-matches li small {
+  display: block;
+  color: #77817c;
+}
+.duplicate-review {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.duplicate-review input {
+  width: auto;
+  margin-top: 3px;
+  accent-color: #256550;
+}
 .account-grid {
   display: grid;
   grid-template-columns: repeat(3,minmax(0,1fr));

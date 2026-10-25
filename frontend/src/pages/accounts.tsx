@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronRight, Mail, Pencil, Plus, UserRound } from 'lucide-react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useResource, useSave } from '../api';
+import { api, useResource, useSave } from '../api';
 import { Alert, Back, Completeness, Empty, Field, Loading, Modal, PageHeader, SaveButton, TrackedForm, formValues, markFormSaved } from '../components';
-import type { Account, Contact, Detail, Page, Revision } from '../types';
+import type { Account, AccountMatches, Contact, Detail, Page, Revision } from '../types';
 import { RecordList } from './lists';
 
 export function Accounts() {
@@ -28,11 +28,39 @@ export function Accounts() {
 
 export function AccountForm({ existing, onDone, onCreated }: { existing?: Revision<Account>; onDone?: () => void; onCreated?: (row: Revision<Account>) => void }) {
   const navigate = useNavigate();
-  const { save, error, busy } = useSave<Account>('account', existing?.entityId, existing?.id);
+  const { save, error, busy, errorCode, unconfirmed, setError } = useSave<Account>('account', existing?.entityId, existing?.id);
+  const [name, setName] = useState(existing?.data.name || '');
+  const [found, setFound] = useState<AccountMatches | null>(null);
+  const [lookupError, setLookupError] = useState('');
+  const [lookupVersion, setLookupVersion] = useState(0);
+  const [reviewedName, setReviewedName] = useState('');
+  const companyName = name.trim();
+  const matches = found?.name === companyName ? found : null;
+  const checking = !existing && !!companyName && !matches && !lookupError;
+  const needsReview = !!matches?.total && !matches.exactCount && reviewedName !== companyName;
+  useEffect(() => {
+    setFound(null); setLookupError(''); setReviewedName('');
+    if (existing || !companyName) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<AccountMatches>(`/accounts/matches?name=${encodeURIComponent(companyName)}`, { signal: controller.signal })
+        .then(value => { if (!controller.signal.aborted) setFound(value); })
+        .catch(e => { if (!controller.signal.aborted) setLookupError(e instanceof Error ? e.message : 'Could not check existing accounts.'); });
+    }, 300);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [companyName, existing, lookupVersion]);
+  useEffect(() => {
+    if (errorCode === 'account_exists') setLookupVersion(version => version + 1);
+  }, [errorCode]);
+  const blocked = !existing && !unconfirmed && (!companyName || checking || !!lookupError || !!matches?.exactCount || needsReview);
   return <>{!existing && !onCreated && <><Back to="/accounts">All accounts</Back><PageHeader eyebrow="CUSTOMER RELATIONSHIPS" title="Create a new account." description="Add the company once, then connect its people and sales records." /></>}
     <TrackedForm className={existing || onCreated ? '' : 'panel form-panel'} onSubmit={async e => {
       const form = e.currentTarget;
       const get = formValues(e);
+      if (blocked) {
+        setError(matches?.exactCount ? 'This account already exists. Use an existing account below.' : 'Check and review existing account matches before creating a new account.');
+        return;
+      }
       const result = await save(existing ? `/accounts/${existing.entityId}` : '/accounts', {
         name: get('name'), address: get('address'), taxReference: get('taxReference'), notes: get('notes'),
       }, existing ? 'PATCH' : 'POST');
@@ -44,12 +72,40 @@ export function AccountForm({ existing, onDone, onCreated }: { existing?: Revisi
       }
     }}>
       <div className="form-grid">
-        <Field label="Company name *" wide><input name="name" autoFocus required maxLength={200} defaultValue={existing?.data.name} placeholder="e.g. Northstar Packaging" /></Field>
+        <Field label="Company name *" wide><input name="name" autoFocus required maxLength={200} value={name} onChange={e => { setName(e.target.value); if (!unconfirmed) setError(''); }} placeholder="e.g. Northstar Packaging" /></Field>
+        {!existing && <div className="field wide account-duplicate-check">
+          {checking && <small role="status">Checking for existing accounts...</small>}
+          {lookupError && <Alert>{lookupError} <button type="button" className="text-button" onClick={() => setLookupVersion(version => version + 1)}>Retry account check</button></Alert>}
+          {!!matches?.total && <section className="account-matches" role="status" aria-label="Existing company matches">
+            <strong>{matches.exactCount ? 'Account already exists.' : 'Similar accounts already exist.'}</strong>
+            <p>{matches.exactCount
+              ? 'Capitalization, spaces and punctuation do not make a different company name. Use the existing account instead.'
+              : 'Check these companies before creating a separate account.'}</p>
+            <ul>{matches.items.map(match => <li key={match.revision.entityId}>
+              <div><strong>{match.revision.data.name}</strong><small>{match.revision.data.address || 'Location not added'}</small>
+                {match.conflicted && <small>Conflicting versions need review.</small>}</div>
+              {match.conflicted ? <Link className="button" to="/conflicts">Review versions</Link>
+                : <button type="button" className="button" disabled={busy || unconfirmed} onClick={e => {
+                  const form = e.currentTarget.form!;
+                  const values = new FormData(form);
+                  if (['address', 'taxReference', 'notes'].some(field => String(values.get(field) || '').trim()) &&
+                      !window.confirm('Use this existing account and discard the new account details?')) return;
+                  markFormSaved(form);
+                  if (onCreated) onCreated(match.revision);
+                  else navigate(`/accounts/${match.revision.entityId}`);
+                }}>Use this account</button>}
+            </li>)}</ul>
+            {matches.total > matches.items.length && <small>{matches.total - matches.items.length} more matching account(s) exist.</small>}
+            {!matches.exactCount && <label className="duplicate-review"><input type="checkbox" checked={reviewedName === companyName}
+              disabled={busy} onChange={e => setReviewedName(e.target.checked ? companyName : '')} />
+              <span>I checked these matches; this is a different company.</span></label>}
+          </section>}
+        </div>}
         <Field label="Location / address" hint="Shown below the company name on its sales records." wide><textarea name="address" rows={3} maxLength={10000} defaultValue={existing?.data.address} placeholder="City, area or office address" /></Field>
         <Field label="GST / tax reference"><input name="taxReference" maxLength={100} defaultValue={existing?.data.taxReference} /></Field>
         <Field label="Account notes" wide><textarea name="notes" rows={3} maxLength={10000} defaultValue={existing?.data.notes} /></Field>
       </div>
-      {error && <Alert>{error}</Alert>}<div className="form-footer"><span>Contact people can be added on the account page.</span><SaveButton busy={busy}>{existing ? 'Save account' : 'Create account'}</SaveButton></div>
+      {error && <Alert>{error}</Alert>}<div className="form-footer"><span>Contact people can be added on the account page.</span><SaveButton busy={busy} disabled={blocked}>{existing ? 'Save account' : 'Create account'}</SaveButton></div>
     </TrackedForm></>;
 }
 

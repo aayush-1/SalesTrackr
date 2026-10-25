@@ -57,7 +57,7 @@ export function NewRecordPage() {
     </TrackedForm>
     {newAccount && <Modal title="Create an account" onClose={() => setNewAccount(false)}><AccountForm onCreated={row => {
       setAccounts(old => [...old.filter(a => a.entityId !== row.entityId), row]); setAccountId(row.entityId); setContactId('');
-      setNewAccount(false); setNotice(`Account "${row.data.name}" is saved. Complete the enquiry below.`);
+      setNewAccount(false); setNotice(`Account "${row.data.name}" is selected. Complete the enquiry below.`);
     }} /></Modal>}
   </>;
 }

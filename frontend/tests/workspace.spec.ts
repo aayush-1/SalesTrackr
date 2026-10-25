@@ -1,4 +1,10 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+
+async function reviewCompanyMatches(page: Page) {
+  await expect(page.getByText('Checking for existing accounts...', { exact: true })).toHaveCount(0);
+  const review = page.getByLabel('I checked these matches; this is a different company.', { exact: true });
+  if (await review.count()) await review.check();
+}
 
 test('record loads are bundled and confirmed saves avoid redundant refetches', async ({ page }) => {
   test.setTimeout(60000);
@@ -125,6 +131,7 @@ for (const fallback of [false, true]) {
     const company = `Safe saves ${fallback} ${Date.now()}`;
     await page.goto('/accounts/new');
     await page.getByLabel('Company name *', { exact: true }).fill(company);
+    await reviewCompanyMatches(page);
     await page.getByRole('button', { name: 'Create account', exact: true }).click();
     await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
     const accountId = new URL(page.url()).pathname.split('/').at(-1)!;
@@ -204,6 +211,7 @@ test('create account and record, progress, pay, close, filter and retain history
   await page.getByRole('button', { name: 'Create a new account' }).click();
   await page.getByLabel('Company name *', { exact: true }).fill(account);
   await page.getByLabel('Location / address').fill('Pune, Maharashtra');
+  await reviewCompanyMatches(page);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByLabel('Account *', { exact: true })).not.toHaveValue('');
@@ -440,6 +448,7 @@ test('company location changes appear on every linked sale without an enquiry ti
   await page.goto('/accounts/new');
   await page.getByLabel('Company name *', { exact: true }).fill(company);
   await page.getByLabel('Location / address').fill('Old location');
+  await reviewCompanyMatches(page);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
   const accountUrl = page.url();
@@ -500,6 +509,7 @@ test('acquisition sorting, focused product editing and discarding retain the sav
   await page.goto('/accounts/new');
   const me = await (await page.request.get('/api/me')).json();
   await page.getByLabel('Company name *', { exact: true }).fill(company);
+  await reviewCompanyMatches(page);
   await page.getByRole('button', { name: 'Create account', exact: true }).click();
   await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
   const accountUrl = page.url();

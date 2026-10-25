@@ -9,6 +9,10 @@ export const labels: Record<Stage, string> = {
 };
 export type Kind = 'account' | 'contact' | 'record';
 export interface Account { name: string; address: string; taxReference: string; notes: string }
+export interface AccountMatches extends Meta {
+  name: string; total: number; exactCount: number;
+  items: { revision: Revision<Account>; match: 'exact' | 'similar'; conflicted: boolean }[];
+}
 export interface Contact { accountId: string; name: string; email: string; phone: string; designation: string }
 export interface SalesRecord {
   accountId: string;
