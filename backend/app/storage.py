@@ -592,6 +592,7 @@ class DriveBackend:
         folders = self._folders(refresh=True)
         allowed = {folders[key]: key for key in FOLDERS}
         revisions, removed = [], []
+        downloaded = {}
         while True:
             result = self._execute(
                 self._api()
@@ -599,7 +600,10 @@ class DriveBackend:
                 .list(
                     pageToken=cursor,
                     pageSize=1000,
-                    fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,parents,trashed))",
+                    fields=(
+                        "nextPageToken,newStartPageToken,"
+                        "changes(fileId,removed,file(id,parents,trashed,version))"
+                    ),
                     includeRemoved=True,
                 )
             )
@@ -611,12 +615,17 @@ class DriveBackend:
                     or not set(allowed).intersection(metadata.get("parents", []))
                 ):
                     removed.extend(self.file_versions.get(change["fileId"], set()))
+                    downloaded.pop(change["fileId"], None)
+                    continue
+                version = metadata.get("version")
+                if version is not None and downloaded.get(change["fileId"]) == version:
                     continue
                 content = self.get(change["fileId"])
                 if content is None:
                     raise Problem("A Drive record is unavailable.", 503, "index_incomplete")
                 kind = next(allowed[parent] for parent in metadata["parents"] if parent in allowed)
                 revisions.extend(self._ingest(change["fileId"], content, kind))
+                downloaded[change["fileId"]] = version
             if result.get("nextPageToken"):
                 cursor = result["nextPageToken"]
             else:

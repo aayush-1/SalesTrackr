@@ -21,23 +21,51 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!response.ok) throw new ApiError(body.error?.message || 'Request failed.', response.status, body.error?.code || 'request');
   return body as T;
 }
-export const RefreshContext = createContext({ version: 0, refresh: () => {} });
+export const RefreshContext = createContext<{
+  version: number; lastSave: Save<unknown> | null; refresh: (saved?: Save<unknown>) => void;
+}>({ version: 0, lastSave: null, refresh: () => {} });
+
+function savedResource<T>(path: string, current: T | null, saved: Save<unknown> | null): T | null {
+  if (!current || !saved?.revisionIsCurrent || saved.warning || !saved.complete) return null;
+  if (path === '/status') {
+    const previous = current as { syncedAt?: string | null };
+    if (previous.syncedAt && saved.syncedAt && Date.parse(previous.syncedAt) > Date.parse(saved.syncedAt)) return null;
+    return { ...current, syncedAt: saved.syncedAt, conflictCount: saved.conflictCount, complete: saved.complete, error: null };
+  }
+  const revision = saved.revision;
+  if (path !== `/entities/${revision.entityType}/${revision.entityId}` &&
+      !(revision.entityType === 'record' && saved.related && path === `/records/${revision.entityId}/detail`)) return null;
+  const previous = (current as { revision?: Revision<unknown> }).revision;
+  if (!previous || (previous.id !== revision.id && !revision.parents.includes(previous.id))) return null;
+  return { ...current, ...saved };
+}
+
 export function useResource<T>(path: string | null) {
-  const { version } = useContext(RefreshContext);
+  const { version, lastSave } = useContext(RefreshContext);
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
+  const resource = useRef<{ path: string | null; data: T | null }>({ path: null, data: null });
   useEffect(() => {
-    if (!path) { setData(null); setLoading(false); return; }
+    if (!path) { resource.current = { path, data: null }; setData(null); setLoading(false); return; }
+    const updated = savedResource(path, resource.current.path === path ? resource.current.data : null, lastSave);
+    if (updated) {
+      resource.current = { path, data: updated };
+      setData(updated); setError(''); setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     setError('');
     setData(null);
-    api<T>(path, { signal: controller.signal }).then(setData).catch(e => {
+    resource.current = { path, data: null };
+    api<T>(path, { signal: controller.signal }).then(value => {
+      if (!controller.signal.aborted) { resource.current = { path, data: value }; setData(value); }
+    }).catch(e => {
       if (!controller.signal.aborted) setError(e instanceof Error ? e.message : 'Could not load data.');
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [path, version]);
+  }, [path, version, lastSave]);
   return { data, error, loading };
 }
 
@@ -69,7 +97,7 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
         }),
       });
       ticket.current = null;
-      refresh();
+      refresh(result);
       return result;
     } catch (e) {
       if (e instanceof ApiError && e.status < 500) ticket.current = null;

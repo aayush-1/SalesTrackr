@@ -117,6 +117,60 @@ def test_changes_pagination_removals_and_filtering():
     assert drive.get.call_count == 2
 
 
+def test_change_replay_downloads_each_unchanged_file_version_only_once():
+    drive = backend()
+    revision = rev()
+    metadata = {"fileId": "canonical-file", "file": {"parents": ["a"], "version": "12"}}
+    drive.service.changes.return_value.list.return_value.execute.side_effect = [
+        {"nextPageToken": "p2", "changes": [metadata] * 50},
+        {"newStartPageToken": "p3", "changes": [metadata] * 50},
+    ]
+    drive.get = MagicMock(return_value=document([revision]))
+    revisions, cursor, removed = drive.changes("p1")
+    assert revisions == [revision] and cursor == "p3" and removed == []
+    drive.get.assert_called_once_with("canonical-file")
+    fields = drive.service.changes.return_value.list.call_args.kwargs["fields"]
+    assert "version" in fields
+    drive.service.changes.return_value.list.return_value.execute.side_effect = [
+        {"newStartPageToken": "p4", "changes": [metadata]}
+    ]
+    drive.get.reset_mock()
+    assert drive.changes("p3")[0] == [revision]
+    drive.get.assert_called_once_with("canonical-file")
+
+
+@pytest.mark.parametrize("versions", [("12", "13"), (None, None)])
+def test_change_replay_downloads_changed_or_unknown_versions(versions):
+    drive = backend()
+    first = rev()
+    second = rev(first["entityId"], [first["id"]])
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "newStartPageToken": "p2",
+        "changes": [
+            {"fileId": "canonical-file", "file": {"parents": ["a"], "version": version}}
+            for version in versions
+        ],
+    }
+    drive.get = MagicMock(side_effect=[document([first]), document([first, second])])
+    revisions, _, removed = drive.changes("p1")
+    assert revisions == [first, first, second] and removed == []
+    assert drive.get.call_count == 2
+
+
+def test_change_replay_rechecks_a_file_after_a_removal():
+    drive = backend()
+    revision = rev()
+    metadata = {"fileId": "canonical-file", "file": {"parents": ["a"], "version": "12"}}
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "newStartPageToken": "p2",
+        "changes": [metadata, {"fileId": "canonical-file", "removed": True}, metadata],
+    }
+    drive.get = MagicMock(return_value=document([revision]))
+    revisions, _, removed = drive.changes("p1")
+    assert revisions == [revision, revision] and removed == [revision["id"]]
+    assert drive.get.call_count == 2
+
+
 def test_ambiguous_create_retry_uses_same_file():
     drive = backend()
     revision = rev()

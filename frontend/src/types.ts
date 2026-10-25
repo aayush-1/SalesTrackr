@@ -38,7 +38,17 @@ export interface Revision<T> {
 export interface Meta { syncedAt: string | null; conflictCount: number; complete: boolean }
 export interface Page<T> extends Meta { items: Revision<T>[]; total: number; dateBasis?: string }
 export interface Detail<T> extends Meta { revision: Revision<T> }
-export interface Save<T> extends Detail<T> { warning: string | null }
+export interface RecordRelations {
+  account: Revision<Account> | null;
+  contact: Revision<Contact> | null;
+  errors: { account?: string; contact?: string };
+}
+export interface RecordWorkspace extends Detail<SalesRecord> { related: RecordRelations }
+export interface Save<T> extends Detail<T> {
+  warning: string | null;
+  revisionIsCurrent?: boolean;
+  related?: RecordRelations;
+}
 export interface Me { email: string; mode: 'demo' | 'production'; today: string }
 export interface Dashboard extends Meta { counts: Record<string, number> }
 export const views: Record<string, { title: string; description: string; stages: readonly Stage[] }> = {
