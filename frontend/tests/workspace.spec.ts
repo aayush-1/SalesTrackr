@@ -18,9 +18,13 @@ test('record loads are bundled and confirmed saves avoid redundant refetches', a
   const contact = await create('contact', { accountId: account.entityId, name: 'Request count contact' });
   const row = await create('record', { accountId: account.entityId, contactId: contact.entityId, productNotes: 'Original requirement' });
   const gets: string[] = [];
+  const attempts: object[] = [];
+  const prepares: string[] = [];
   page.on('request', request => {
     const path = new URL(request.url()).pathname;
     if (request.method() === 'GET' && path.startsWith('/api/')) gets.push(path);
+    if (path === '/api/writes/prepare') prepares.push(path);
+    if (path === `/api/records/${row.entityId}/product-notes`) attempts.push(request.postDataJSON());
   });
   const detailPath = `/api/records/${row.entityId}/detail`;
   const historyPath = `/api/entities/record/${row.entityId}/history`;
@@ -91,12 +95,83 @@ test('record loads are bundled and confirmed saves avoid redundant refetches', a
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('dialog')).toContainText('Synthetic unconfirmed save.');
   expect(gets.filter(path => path === detailPath || path === '/api/status')).toEqual([]);
+  const sent = attempts.length;
+  await page.getByLabel('Product / requirement notes', { exact: true }).fill('Cannot change an unconfirmed save.');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('The previous save is unconfirmed.');
+  expect(attempts).toHaveLength(sent);
+  await page.getByLabel('Product / requirement notes', { exact: true }).fill('Retry keeps one saved revision.');
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('.note-block').first()).toContainText('Retry keeps one saved revision.');
   await expect(page.locator('.history-item')).toHaveCount(++versions);
   expect(gets.filter(path => path === detailPath || path === '/api/status')).toEqual([]);
+  expect(prepares).toEqual([]);
+  expect(attempts.at(-1)).toEqual(attempts.at(-2));
 });
+
+for (const fallback of [false, true]) {
+  test(`new accounts and contacts allocate IDs; edits retain safe retry IDs${fallback ? ' without browser UUID support' : ''}`, async ({ page }) => {
+    test.setTimeout(60000);
+    if (fallback) {
+      await page.addInitScript(() => {
+        Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined });
+      });
+    }
+    const prepares: { entityType: string; entityId: string | null }[] = [];
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === '/api/writes/prepare') prepares.push(request.postDataJSON());
+    });
+    const company = `Safe saves ${fallback} ${Date.now()}`;
+    await page.goto('/accounts/new');
+    await page.getByLabel('Company name *', { exact: true }).fill(company);
+    await page.getByRole('button', { name: 'Create account', exact: true }).click();
+    await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+    const accountId = new URL(page.url()).pathname.split('/').at(-1)!;
+    await page.getByRole('button', { name: 'Edit account', exact: true }).click();
+    await page.getByLabel('Account notes', { exact: true }).fill('Account edit remains confirmed.');
+    await page.getByRole('button', { name: 'Save account', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText('Account edit remains confirmed.', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Add contact', exact: true }).click();
+    await page.getByLabel('Contact name *', { exact: true }).fill('Safe retry contact');
+    await page.getByRole('button', { name: 'Save contact', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Edit Safe retry contact', exact: true })).toBeVisible();
+    const contacts = await (await page.request.get(`/api/contacts?accountId=${accountId}`)).json();
+    const contactId = contacts.items[0].entityId;
+    const attempts: { writeId: string }[] = [];
+    await page.route(`**/api/contacts/${contactId}`, async route => {
+      attempts.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      if (attempts.length === 1) {
+        await route.fulfill({ status: 503, json: { error: { code: 'save_unknown', message: 'Synthetic unconfirmed contact save.' } } });
+      } else {
+        await route.fulfill({ response });
+      }
+    });
+    await page.getByRole('button', { name: 'Edit Safe retry contact', exact: true }).click();
+    await page.getByLabel('Designation', { exact: true }).fill('One confirmed contact edit');
+    await page.getByRole('dialog').locator('form').evaluate((form: HTMLFormElement) => {
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    await expect(page.getByRole('dialog')).toContainText('Synthetic unconfirmed contact save.');
+    expect(attempts).toHaveLength(1);
+    await page.getByRole('button', { name: 'Save contact', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByText('One confirmed contact edit', { exact: true })).toBeVisible();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+    expect(attempts[0].writeId).toMatch(/^[a-f0-9]{32}$/);
+    const accountHistory = await (await page.request.get(`/api/entities/account/${accountId}/history`)).json();
+    const contactHistory = await (await page.request.get(`/api/entities/contact/${contactId}/history`)).json();
+    expect(accountHistory.total).toBe(2);
+    expect(contactHistory.total).toBe(2);
+    expect(prepares.filter(ticket => ticket.entityId === null).map(ticket => ticket.entityType)).toEqual(['account', 'contact']);
+    expect(prepares).toHaveLength(fallback ? 4 : 2);
+  });
+}
 
 test('sample workspace and mobile navigation', async ({ page }) => {
   const errors: string[] = [];

@@ -74,6 +74,7 @@ class Workspace(DriveBackend):
         entry = self.entries.get(file_id)
         return {
             "id": file_id,
+            "version": str(entry["version"]) if entry else None,
             "parents": [entry["parent"]] if entry else [self.root_id],
             "mimeType": "application/json" if entry else "application/vnd.google-apps.folder",
             "trashed": entry["trashed"] if entry else False,
@@ -114,7 +115,9 @@ class Workspace(DriveBackend):
         entry = self.entries[file_id]
         entry["version"] += 1
         self.events.append(
-            {"fileId": file_id, "file": {"parents": [entry["parent"]], "trashed": entry["trashed"]}}
+            {"fileId": file_id, "file": {
+                "parents": [entry["parent"]], "trashed": entry["trashed"], "version": str(entry["version"]),
+            }}
         )
 
     def _upload(self, data, parent, filename, file_id=None, properties=None):
@@ -132,7 +135,7 @@ class Workspace(DriveBackend):
             "version": 0,
         }
         self._changed(file_id)
-        return {"id": file_id}
+        return {"id": file_id, "version": str(self.entries[file_id]["version"])}
 
     def replace(self, file_id, data, etag, *, name=None, properties=None):
         if str(self.entries[file_id]["version"]) != etag:
@@ -141,7 +144,7 @@ class Workspace(DriveBackend):
         if name:
             self.entries[file_id]["name"] = name
         self._changed(file_id)
-        return {"id": file_id}
+        return {"id": file_id, "version": str(self.entries[file_id]["version"])}
 
     def trash(self, file_id, *, etag=None):
         if etag is not None and etag != str(self.entries[file_id]["version"]):
@@ -345,6 +348,30 @@ def test_ambiguous_update_retry_returns_original_operation():
     assert drive.create({**edit, "createdAt": now()}) == edit
     assert len(drive.revisions(root["entityId"])) == 2
     assert len(drive.live_ids("account")) == 1
+
+
+def test_confirmed_write_replay_still_applies_a_concurrent_newer_revision():
+    drive = Workspace(schema=2)
+    repo = Repository(drive)
+    repo.sync()
+    root = revision(entity=drive.allocate())
+    repo.commit(root)
+    edit = revision(root["entityId"], [root["id"]], "Our synthetic save")
+    newer = revision(root["entityId"], [edit["id"]], "Concurrent synthetic save")
+    replace = drive.replace
+
+    def race(file_id, data, etag, **kwargs):
+        confirmed = replace(file_id, data, etag, **kwargs)
+        replace(file_id, document([root, edit, newer]), confirmed["version"])
+        return confirmed
+
+    drive.replace = race
+    result = repo.commit(edit)
+    assert result == {"revision": edit, "warning": None}
+    assert repo.current(root["entityId"]) == newer
+    assert repo.read_history(root["entityId"]) == [root, edit, newer]
+    assert len(drive.live_ids("account")) == 1
+    assert drive.confirmed_writes == {}
 
 
 def test_one_hundred_saves_keep_one_entity_file_and_one_checkpoint():

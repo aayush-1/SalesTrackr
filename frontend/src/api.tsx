@@ -86,9 +86,11 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
         throw new Error('The previous save is unconfirmed. Restore the form values and retry that save before making changes.');
       }
       if (!ticket.current) {
-        const prepared = await api<{ writeId: string; entityId: string }>('/writes/prepare', {
-          method: 'POST', body: JSON.stringify({ entityType: kind, entityId: entityId || null }),
-        });
+        const prepared = entityId && typeof globalThis.crypto?.randomUUID === 'function'
+          ? { writeId: globalThis.crypto.randomUUID().replaceAll('-', ''), entityId }
+          : await api<{ writeId: string; entityId: string }>('/writes/prepare', {
+            method: 'POST', body: JSON.stringify({ entityType: kind, entityId: entityId || null }),
+          });
         ticket.current = { ...prepared, key };
       }
       const result = await api<Save<T>>(path, {
