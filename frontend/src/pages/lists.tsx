@@ -1,7 +1,7 @@
 import { useContext, useRef, useState } from 'react';
 import { ArrowDownLeft, ArrowRight, ArrowUpRight, CircleDollarSign, Leaf, MessageSquare, PackageCheck, Plus } from 'lucide-react';
 import { Link, useOutletContext, useParams } from 'react-router-dom';
-import { api, RefreshContext, useResource } from '../api';
+import { api, ApiError, generationHeaders, RefreshContext, useFormWorkspace, useResource } from '../api';
 import { Alert, Completeness, Empty, Field, Loading, PageHeader, RecordTable, SaveButton } from '../components';
 import { formatDate, labels, views } from '../types';
 import type { Account, Dashboard, Detail, Kind, Me, Page, Revision, SalesRecord } from '../types';
@@ -121,11 +121,13 @@ export function Conflicts() {
 }
 function ConflictCard({ item }: { item: Conflict }) {
   const { refresh } = useContext(RefreshContext);
+  const workspace = useFormWorkspace();
   const [selected, setSelected] = useState(item.versions[0].id);
   const [reason, setReason] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const pending = useRef<{ id: string; key: string } | null>(null);
+  const inFlight = useRef(false);
   const accountId = item.versions[0].data.accountId;
   const account = useResource<Detail<Account>>(item.entityType === 'record' && typeof accountId === 'string' ? `/entities/account/${accountId}` : null);
   return <section className="panel conflict-card"><h2>{item.entityType} · {item.entityType === 'record' ? account.data?.revision.data.name || item.entityId : String(item.versions[0].data.name || item.entityId)}</h2>
@@ -133,18 +135,24 @@ function ConflictCard({ item }: { item: Conflict }) {
     {account.error && <Alert>{account.error}</Alert>}
     <div className="conflict-versions">{item.versions.map(v => <label key={v.id} className="version-option"><span><input type="radio" name={item.entityId} checked={selected === v.id} onChange={() => setSelected(v.id)} /> Recorded {formatDate(v.createdAt)}</span><pre>{JSON.stringify(v.data, null, 2)}</pre></label>)}</div>
     <form onSubmit={async e => {
-      e.preventDefault(); setBusy(true); setError('');
+      e.preventDefault();
+      if (inFlight.current) return;
+      inFlight.current = true; setBusy(true); setError('');
       const key = JSON.stringify({ selected, reason, parents: item.versions.map(v => v.id) });
       try {
+        const headers = generationHeaders(workspace);
         if (pending.current && pending.current.key !== key) throw new Error('Retry the original resolution before changing it.');
         if (!pending.current) {
-          const prepared = await api<{ writeId: string }>('/writes/prepare', { method: 'POST', body: JSON.stringify({ entityType: item.entityType, entityId: item.entityId }) });
+          const prepared = await api<{ writeId: string }>('/writes/prepare', { method: 'POST', headers, body: JSON.stringify({ entityType: item.entityType, entityId: item.entityId }) });
           pending.current = { id: prepared.writeId, key };
         }
-        await api(`/entities/${item.entityType}/${item.entityId}/resolve`, { method: 'POST', body: JSON.stringify({ writeId: pending.current.id, parents: item.versions.map(v => v.id), selectedRevision: selected, reason }) });
+        await api(`/entities/${item.entityType}/${item.entityId}/resolve`, { method: 'POST', headers, body: JSON.stringify({ writeId: pending.current.id, parents: item.versions.map(v => v.id), selectedRevision: selected, reason }) });
         pending.current = null; refresh();
-      } catch (e) { setError(e instanceof Error ? e.message : 'Could not resolve.'); }
-      finally { setBusy(false); }
+      } catch (e) {
+        if (e instanceof ApiError && e.status < 500) pending.current = null;
+        setError(e instanceof Error ? e.message : 'Could not resolve.');
+      }
+      finally { inFlight.current = false; setBusy(false); }
     }}><Field label="Resolution reason"><input required value={reason} onChange={e => setReason(e.target.value)} /></Field>
       {error && <Alert>{error}</Alert>}<SaveButton busy={busy}>Keep selected version</SaveButton></form>
   </section>;

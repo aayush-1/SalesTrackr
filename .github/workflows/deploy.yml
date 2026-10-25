@@ -44,11 +44,36 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          install_components: cloud-firestore-emulator
       - name: Install Python dependencies
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
           .venv/bin/python -m pip install --disable-pip-version-check -e '.[dev]'
+      - name: Start isolated Firestore emulator
+        run: |
+          gcloud emulators firestore start --host-port=127.0.0.1:8085 \
+            --project=demo-salestrackr-ci --quiet > "$RUNNER_TEMP/firestore-emulator.log" 2>&1 &
+          echo "FIRESTORE_EMULATOR_HOST=127.0.0.1:8085" >> "$GITHUB_ENV"
+          .venv/bin/python - <<'PY'
+          import time
+          import urllib.request
+          for attempt in range(60):
+              try:
+                  with urllib.request.urlopen("http://127.0.0.1:8085/", timeout=2) as response:
+                      assert response.status == 200
+                  break
+              except OSError:
+                  time.sleep(1)
+          else:
+              raise SystemExit("The Firestore emulator did not become ready.")
+          PY
       - name: Check backend
         run: |
           .venv/bin/python -m ruff check backend scripts
@@ -59,6 +84,9 @@ jobs:
           npm --prefix frontend exec -- playwright install --with-deps chromium
       - name: Build and check UI
         run: npm --prefix frontend test
+      - name: Check real Firestore backup and recovery UI
+        working-directory: frontend
+        run: npx playwright test --config playwright.firestore.config.ts --reporter=line
 
   deploy:
     name: Deploy production

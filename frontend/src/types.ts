@@ -39,7 +39,8 @@ export interface Revision<T> {
   accountName?: string;
   accountLocation?: string;
 }
-export interface Meta { syncedAt: string | null; conflictCount: number; complete: boolean }
+export interface WorkspaceStorage { storageBackend?: 'drive' | 'firestore'; generation?: string | null }
+export interface Meta extends WorkspaceStorage { syncedAt: string | null; conflictCount: number; complete: boolean }
 export interface Page<T> extends Meta { items: Revision<T>[]; total: number; dateBasis?: string }
 export interface Detail<T> extends Meta { revision: Revision<T> }
 export interface RecordRelations {
@@ -53,7 +54,23 @@ export interface Save<T> extends Detail<T> {
   revisionIsCurrent?: boolean;
   related?: RecordRelations;
 }
-export interface Me { email: string; mode: 'demo' | 'production'; today: string }
+export interface Me extends WorkspaceStorage { email: string; mode: 'demo' | 'production'; today: string }
+export interface BackupCounts { account: number; contact: number; record: number; revisions: number }
+export interface Backup {
+  id: string; name: string; createdAt: string;
+  source: 'manual' | 'scheduled' | 'migration' | 'pre-restore';
+  protected: boolean; counts: BackupCounts; sizeBytes: number;
+}
+export interface BackupSettings {
+  mode: 'demo' | 'production'; storageBackend: 'drive' | 'firestore';
+  location: string; folderUrl: string | null;
+  schedule: { enabled: boolean; active?: boolean; weekday: 'Sunday'; time: '02:00'; timezone: 'Asia/Kolkata' };
+  retention: 3; backups: Backup[]; lastBackupAt: string | null; lastError: string | null;
+  canBackup: boolean; canRestore: boolean; generation: string | null;
+}
+export interface BackupPreview {
+  token: string; backup: Backup; generation: string; warnings: string[]; expiresAt: string;
+}
 export interface Dashboard extends Meta { counts: Record<string, number> }
 export const views: Record<string, { title: string; description: string; stages: readonly Stage[] }> = {
   all: { title: 'All sales records', description: 'Every enquiry, including discarded records, ordered by lead acquired date.', stages },

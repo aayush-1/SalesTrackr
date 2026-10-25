@@ -6,6 +6,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const python = process.platform === 'win32' ? '.venv\\Scripts\\python.exe' : '.venv/bin/python';
 export default defineConfig({
   testDir: './tests',
+  testIgnore: 'firestore-backup.spec.ts',
   workers: 1,
   use: { baseURL: 'http://127.0.0.1:8011', viewport: { width: 1440, height: 1000 }, trace: 'retain-on-failure' },
   webServer: {
@@ -13,6 +14,6 @@ export default defineConfig({
     cwd: root,
     url: 'http://127.0.0.1:8011/healthz',
     reuseExistingServer: false,
-    env: { APP_MODE: 'demo', DEMO_DATA_DIR: '.local-data/e2e', PUBLIC_ORIGIN: 'http://127.0.0.1:8011' },
+    env: { APP_MODE: 'demo', STORAGE_BACKEND: 'drive', DEMO_DATA_DIR: '.local-data/e2e', PUBLIC_ORIGIN: 'http://127.0.0.1:8011' },
   },
 });

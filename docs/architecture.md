@@ -2,7 +2,8 @@
 
 ## Request path
 
-Browser -> IAP -> FastAPI -> Drive API. FastAPI also serves the Vite production assets.
+Browser -> IAP -> FastAPI -> configured storage backend. FastAPI also serves the Vite production assets.
+Drive remains the default; the Firestore implementation is opt-in pending production migration.
 
 `APP_MODE=demo` uses synthetic local JSON storage and a localhost-only identity. `APP_MODE=production` requires Drive configuration, IAP audience, and an HTTPS public origin. Cloud Run rejects demo mode at startup.
 
@@ -127,7 +128,156 @@ Remove the credential from the process after operating:
 Remove-Item Env:\GOOGLE_TOKEN_JSON
 ```
 
-Drive revision history and same-account backups do not survive loss of that account. An off-account backup policy requires a separate storage decision. Automatic history pruning and backup-retention cleanup are not implemented.
+Drive revision history and same-account backups do not survive loss of that account. An off-account
+backup policy requires a separate storage decision. The original Drive backend does not automatically
+prune history or backups. Firestore backup retention is described below.
+
+## Firestore backend and recovery
+
+`STORAGE_BACKEND=firestore` requires `FIRESTORE_PROJECT_ID`; `FIRESTORE_DATABASE_ID` defaults to
+`(default)` and `FIRESTORE_WORKSPACE_ID` to `salestrackr`. Production continues to require IAP, HTTPS,
+and the existing Drive credential/folder for backups. Production refuses emulator configuration.
+Local mode requires both a `demo-` project and a localhost emulator, and uses anonymous emulator-only
+credentials. Browser clients never receive a Firestore credential; `firestore.rules` denies direct
+client access. Server access is through the runtime's separately granted IAM identity.
+
+The workspace control document selects one active dataset and carries a unique generation, mutation
+sequence, transactional dashboard counters, weekly preference, and bounded maintenance/job leases.
+Each dataset has indexed current-entity projections, immutable revision metadata, and transactional
+normalized-account-name reservations. Immutable canonical JSON payloads are content-addressed, compressed,
+and split into 512 KiB binary documents outside the indexes. Large permitted records do not have to fit
+in a single Firestore document; growing history is never embedded in the current document.
+
+A normal save reads the specific current entity, uploads only its new immutable payload, and commits
+the revision, expected heads, reference checks, name reservations, counters, and sequence atomically.
+Stale bases, conflicting references, operation-ID reuse by another body/actor, and exact normalized
+duplicate creation are rejected across clients. Retries acknowledge an existing operation before
+reapplying business rules. Existing-account rename collisions retain the existing warning behavior.
+All current workflow, discarded/read-only, feedback, payment, history, and conflict rules are shared.
+New Firestore timing phases distinguish payload upload and transaction latency without logging data.
+
+Record view/account/stage combinations are indexed as query buckets, with acquisition-date ordering and
+range filtering; accounts use indexed name ordering and contacts an indexed account reference. History
+reads only the requested page of immutable payloads. Dashboard counters change in the same transaction
+as the entity. `firestore.indexes.json` must be provisioned and report READY before cutover.
+Firestore is not a substring/full-text search engine: existing substring and due-date semantics remain
+authoritative residual filters on already narrowed lightweight projections, followed by loading only
+the requested page's complete payloads. Account names/locations are joined from current account
+projections, so renaming a company does not leave stale names embedded in sales records.
+
+### Plain backups and retention
+
+Settings -> Backup and recovery is a common UI; the original Drive backend reports the new actions as
+unavailable until migration. Firestore backups upload directly to the private Drive backups folder,
+without a Cloud Storage staging bucket. Public-link and whole-domain backup folders are rejected.
+Production requires `BACKUP_DRIVE_FOLDER_ID` pointing to a separate folder inside the configured
+SalesTrackr root, marked `app=salestrackr-firestore-backups`. There is no fallback to the legacy
+Drive backup/data folders. Rotation only considers validated archives in this dedicated folder;
+existing Drive records and old backup files are not rewritten, trashed or deleted by this migration.
+Demo mode uses the same archive/recovery logic with an isolated filesystem adapter and clearly labels
+the simulation.
+
+Each new ZIP contains a versioned `manifest.json`, plus readable, indented `accounts.json`,
+`contacts.json` and `sales-records.json`. These are lists of version-2 entity documents, each with
+`current` and `history`, retaining every original revision: IDs, parents, timestamps, actor, action,
+fingerprint, current state, legacy fields, conflicts, and history. Sales include stage dates,
+follow-ups, payment/feedback status and notes. An entity with unresolved conflicts has no single
+current revision; all branches remain in its history. There is no archive
+password or application-managed encryption. Google's ordinary transport/at-rest encryption still applies.
+The manifest records counts and canonical SHA-256 hashes, not just filenames. Export verifies that the
+active generation/sequence stayed unchanged throughout collection; a busy snapshot is retried and then
+reported as unsuccessful rather than mixing versions.
+
+A completed upload is downloaded and checked before it is catalogued as verified or older copies are
+pruned. Manual/job operation IDs and preallocated destination IDs survive unknown responses; a retry
+reconciles the same file instead of creating another backup. Keep exactly the newest three backups
+in total, including migration, manual, scheduled and pre-restore copies; none is permanently protected.
+Old files go to recoverable Drive Trash (and remain subject to Drive's Trash storage/expiry policy).
+With only weekly backups this covers three weeks; manual/recovery copies rotate older weeks sooner.
+Verification failure never prunes the valid existing copies.
+
+Available backups are reconciled against the actual private provider folder. Previously verified
+files use provider checksums to avoid repeated Drive downloads; new accessible ZIP/legacy JSON
+files must pass full archive validation before becoming selectable. Missing/changed files are
+excluded with a warning; a changed file is never silently re-trusted. Legacy JSON without its own
+timestamp uses the provider's file creation time. Listing never deletes files; rotation runs after
+verified backup creation or recovery, and invalid/unrelated files are never selected for pruning.
+Files inaccessible to the existing Drive OAuth scope can instead be uploaded through the restore UI;
+discovery does not broaden Drive permissions. Earlier revision-per-file ZIP backups remain readable.
+
+The fixed weekly preference is Sunday 02:00 `Asia/Kolkata`. Production scheduling is a separate
+provisioning step: Cloud Scheduler authenticates with OAuth/IAM to invoke a dedicated Cloud Run Job
+using this image and `python -m scripts.firestore_admin backup --scheduled`. Grant only the scheduler's
+job-invocation permission and the job's required Firestore/Drive-secret access. Do not make an app
+endpoint public or bypass IAP to schedule backups. The job uses a deterministic weekly operation ID,
+checks the saved preference, verifies readback, and applies the same retention policy.
+`BACKUP_SCHEDULE_READY=true` is only set after the job/schedule is provisioned and verified; saving the
+preference alone does not create a scheduler. No post-request background thread is assumed to run.
+
+### Recovery and the generation fence
+
+Restoration requires a selected verified Drive backup or a ZIP/legacy JSON upload, validation/preview,
+and an explicit typed `RESTORE`. Production recovery and schedule changes require an actor listed in
+`RECOVERY_ADMIN_EMAILS` (comma-separated, case-insensitive); an unset list fails closed. Ordinary
+authenticated readers may create/download backups, but cannot restore or change the schedule.
+
+Previews are actor/content/generation/sequence-bound, expire after ten minutes, and fail after a server
+restart or intervening save. A restore takes a maintenance fence, verifies a backup of current data,
+stages a new empty dataset, and reads back all version hashes, head projections and name reservations
+before atomically activating it. It is a full rollback, never an in-place merge. The previous dataset
+remains archived; failed staging never changes live data. Lost activation responses are reconciled by
+the same persistent restore operation ID. Concurrent retries cannot clear another invocation's fence;
+an interrupted fence expires after ten minutes and is safely cleared before subsequent saves.
+
+Forms capture their workspace generation and send `X-SalesTrackr-Generation` on preparation, save,
+retry and resolution. A restore changes this generation even when an old revision ID reappears, so
+forms opened before recovery cannot recreate later records or modify the restored workspace without
+refreshing. The successful recovery screen reloads the application.
+
+Uploads are bounded to 64 MiB compressed and 256 MiB expanded; unexpected paths, duplicate entries/JSON
+keys, encryption, unsupported formats, altered hashes, invalid models, broken ancestry and duplicate
+version IDs are rejected before activation. Files are never extracted to arbitrary filesystem paths.
+Large recovery jobs must fit the service request/memory budget; these limits fail explicitly rather
+than truncating a backup. Archived datasets/payloads are deliberately not garbage-collected automatically.
+
+### Recovery without the original app
+
+Download a backup directly from Drive while that account remains accessible, and verify or unpack it
+with no cloud credentials:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.firestore_admin validate ".local-data\backup.zip"
+.\.venv\Scripts\python.exe -m scripts.firestore_admin unpack ".local-data\backup.zip" `
+  --output ".local-data\recovered.json"
+```
+
+For a new Firestore project/database/workspace, authenticate locally using a separately authorized
+Google identity and provision the indexes. The default command only validates and plans:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.firestore_admin restore-empty ".local-data\backup.zip" `
+  --project "<recovery-project>" --workspace "<new-empty-workspace>"
+```
+
+Add `--apply` to stage, verify and activate an empty target. It refuses populated targets, does not
+need the old app or its Drive secret, and checks exact raw history after activation. `--emulator` is
+available only for isolated localhost `demo-` rehearsal targets. Normal UI recovery uses its own
+pre-restore backup and maintenance flow instead.
+
+Production cutover is intentionally separate from local preview: pause/drain Drive writers, retain
+a verified original source backup, compare every original revision hash and head in the staged
+Firestore dataset, wait for indexes, preserve IAP/runtime identity, then activate the new backend.
+Keep original Drive data recoverable until live validation and an independent recovery rehearsal pass.
+`scripts.firestore_admin.migrate_drive` persists a restartable, target-bound maintenance fence in
+the source settings, drains the existing 300-second request budget, retains a local readable source
+snapshot, and imports only into an empty/matching Firestore target. It compares every raw revision
+and all original account/contact/sales/old-backup file IDs, names, content checksums and versions
+after migration. It never rewrites or trashes those source files. The source remains read-only after
+cutover to prevent old revisions writing a second live copy. The separate Firestore backup folder
+is configured only in the service environment, not substituted for any legacy source folder.
+Local emulator success is not a production latency benchmark or proof of actual Drive upload/scheduler
+permissions. Backups are not protection against losing both Google accounts, and no software promises
+indefinite retention after cloud billing suspension.
 
 ## Verification boundary
 

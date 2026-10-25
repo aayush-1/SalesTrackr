@@ -1,24 +1,62 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import type { Kind, Page, Revision, Save } from './types';
+import type { Kind, Page, Revision, Save, WorkspaceStorage } from './types';
+
+export const WorkspaceContext = createContext<WorkspaceStorage | null>(null);
+let observedWorkspace: WorkspaceStorage | null = null;
+export function generationHeaders(workspace: WorkspaceStorage | null): Record<string, string> {
+  if (!workspace || !observedWorkspace) throw new ApiError('Workspace identity is unknown. Refresh this page before saving.', 409, 'generation_unknown');
+  if (workspace.storageBackend === 'firestore' || observedWorkspace.storageBackend === 'firestore') {
+    if (workspace.storageBackend !== 'firestore' || !workspace.generation ||
+        workspace.generation !== observedWorkspace.generation) {
+      throw new ApiError('The workspace has changed or its generation is unknown. Refresh this page and reopen the form before saving.', 409, 'generation_changed');
+    }
+    return { 'X-SalesTrackr-Generation': workspace.generation };
+  }
+  return {};
+}
+export function useFormWorkspace() {
+  const workspace = useContext(WorkspaceContext);
+  return useRef(workspace).current;
+}
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public code: string) { super(message); }
 }
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers({ 'Content-Type': 'application/json', 'X-SalesTrackr-Request': '1' });
+  new Headers(options.headers).forEach((value, name) => headers.set(name, value));
+  const mutation = !['GET', 'HEAD', 'OPTIONS'].includes((options.method || 'GET').toUpperCase());
+  const backupManagement = /^\/(?:backups(?:\/|$)|settings\/backup-recovery(?:\?|$))/.test(path);
+  if (mutation && !backupManagement) {
+    if (!observedWorkspace || (observedWorkspace.storageBackend === 'firestore' &&
+        (!observedWorkspace.generation || headers.get('X-SalesTrackr-Generation') !== observedWorkspace.generation))) {
+      throw new ApiError('Workspace generation is unknown or has changed. Refresh this page and reopen the form before saving.', 409, 'generation_changed');
+    }
+  }
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
-      ...options, headers: { 'Content-Type': 'application/json', 'X-SalesTrackr-Request': '1', ...options.headers },
+      ...options, headers,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new ApiError('Connection lost. If saving, retry without changing the form to confirm the same save.', 503, 'network');
   }
-  const text = await response.text();
+  let text: string;
+  try { text = await response.text(); }
+  catch { throw new ApiError('The response was interrupted. The operation is unconfirmed; retry the same operation.', 503, 'network'); }
   let body;
   try { body = JSON.parse(text); }
   catch { throw new ApiError('The server did not return data. Your sign-in may have expired; refresh this page.', 503, 'response'); }
+  if (!body || typeof body !== 'object') throw new ApiError('The server returned an invalid response. The operation is unconfirmed; retry the same operation.', 503, 'response');
   if (!response.ok) throw new ApiError(body.error?.message || 'Request failed.', response.status, body.error?.code || 'request');
+  if (path === '/me' || body.storageBackend) {
+    if (body.storageBackend === 'firestore') {
+      observedWorkspace = { storageBackend: 'firestore', generation: body.generation ?? null };
+    } else if (body.storageBackend === 'drive' || path === '/me') {
+      observedWorkspace = { storageBackend: 'drive', generation: null };
+    }
+  }
   return body as T;
 }
 export const RefreshContext = createContext<{
@@ -71,6 +109,7 @@ export function useResource<T>(path: string | null) {
 
 export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string) {
   const { refresh } = useContext(RefreshContext);
+  const workspace = useFormWorkspace();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [errorCode, setErrorCode] = useState('');
@@ -84,6 +123,7 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
     setErrorCode('');
     const key = JSON.stringify({ path, data, baseRevision, method });
     try {
+      const headers = generationHeaders(workspace);
       if (ticket.current && ticket.current.key !== key) {
         throw new Error('The previous save is unconfirmed. Restore the form values and retry that save before making changes.');
       }
@@ -91,12 +131,12 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
         const prepared = entityId && typeof globalThis.crypto?.randomUUID === 'function'
           ? { writeId: globalThis.crypto.randomUUID().replaceAll('-', ''), entityId }
           : await api<{ writeId: string; entityId: string }>('/writes/prepare', {
-            method: 'POST', body: JSON.stringify({ entityType: kind, entityId: entityId || null }),
+            method: 'POST', headers, body: JSON.stringify({ entityType: kind, entityId: entityId || null }),
           });
         ticket.current = { ...prepared, key };
       }
       const result = await api<Save<T>>(path, {
-        method, body: JSON.stringify({
+        method, headers, body: JSON.stringify({
           writeId: ticket.current.writeId, entityId: ticket.current.entityId, baseRevision: baseRevision || null, data,
         }),
       });
@@ -109,7 +149,7 @@ export function useSave<T>(kind: Kind, entityId?: string, baseRevision?: string)
       setErrorCode(e instanceof ApiError ? e.code : '');
       return null;
     } finally { inFlight.current = false; setBusy(false); }
-  }, [kind, entityId, baseRevision, refresh]);
+  }, [kind, entityId, baseRevision, refresh, workspace]);
   return { save, busy, error, setError, errorCode, unconfirmed: ticket.current !== null };
 }
 

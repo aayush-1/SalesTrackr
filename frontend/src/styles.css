@@ -186,6 +186,19 @@ nav>a.active svg {
   margin: 25px 13px 10px;
   font-weight: 650;
 }
+.sidebar-settings {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+.sidebar-settings:hover,.sidebar-settings.active {
+  background: #285349;
+  color: #fff;
+}
 .sidebar-bottom {
   margin-top: auto;
   padding: 26px 3px;
@@ -204,7 +217,7 @@ nav>a.active svg {
   color: #91ad9d;
 }
 .sidebar-bottom>.online-dot {
-  margin-left: auto;
+  flex-shrink: 0;
 }
 .avatar {
   width: 33px;
@@ -1758,6 +1771,85 @@ th {
   }
   .actions {
     flex-direction: row;
+  }
+}
+.settings-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #dce2dc;
+  margin-bottom: 22px;
+}
+.settings-tabs button {
+  background: transparent;
+  padding: 12px 16px;
+  border-bottom: 3px solid transparent;
+  color: #687b70;
+}
+.settings-tabs button[aria-selected=true] {
+  color: #245b45;
+  border-color: #245b45;
+  font-weight: 650;
+}
+.backup-settings {
+  display: grid;
+  gap: 18px;
+}
+.settings-section>p,.settings-section>.alert,.restore-preview>.alert {
+  margin-bottom: 18px;
+}
+.settings-section h2 {
+  margin-bottom: 16px;
+}
+.settings-section .section-heading h2 {
+  margin-bottom: 0;
+}
+.backup-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit,minmax(130px,1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+.backup-summary dd {
+  margin-bottom: 0;
+}
+.backup-progress,.schedule-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.schedule-toggle {
+  margin: 18px 0 8px;
+}
+.schedule-toggle input {
+  width: auto;
+  accent-color: #256550;
+}
+.backup-table td:first-child {
+  overflow-wrap: anywhere;
+  max-width: 300px;
+}
+.restore-selection {
+  margin: 20px 0;
+}
+.restore-preview {
+  margin-top: 24px;
+  padding-top: 22px;
+  border-top: 1px solid #dce2dc;
+}
+.restore-preview>.field {
+  max-width: 400px;
+  margin: 18px 0;
+}
+@media(max-width:760px) {
+  .settings-tabs button {
+    padding: 10px;
+  }
+  .settings-section .section-heading {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .settings-section .button {
+    white-space: normal;
   }
 }
 @media(prefers-reduced-motion:reduce) {

@@ -18,6 +18,8 @@ A private sales workspace: one customer account, one record per enquiry, and a d
 - Sales tables are ordered by **lead-acquired date, newest first**, with a visible descending indicator. Note edits and stage changes do not reorder them by last-update time.
 - **Discard record** works at any stage, including Closed, and requires a remark. Discarded records become read-only and remain in **Discarded** and **All sales records**, but leave stage/payment queues and their counts. The discard date, remark, original stage/payment state, and history are retained; nothing is deleted.
 - React/TypeScript UI, FastAPI backend, a local demo, Drive storage adapter, and a Cloud Run Dockerfile.
+- An opt-in Firestore backend and **Settings -> Backup and recovery** local preview, with verified
+  plain ZIP backups, three-copy rotation, and full-workspace recovery.
 
 **Received** confirms payment and automatically closes an already-delivered sale. Before delivery it records receipt without skipping dispatch/delivery; after delivery, close the sale with Received or the final stage action. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
 
@@ -75,6 +77,43 @@ npm --prefix frontend test
 The browser suite builds the UI, starts an isolated local API on port 8011, exercises desktop/mobile flows, and writes screenshots into ignored `frontend\test-results`. Its synthetic data is isolated in `.local-data\e2e`.
 
 Runtime dependencies are pinned in `requirements.txt`; frontend dependencies are pinned in `frontend\package-lock.json`.
+
+## Firestore and recovery preview
+
+Production storage remains Drive until an explicit, verified cutover. `STORAGE_BACKEND=firestore` selects
+the new backend; leaving it unset preserves existing behavior. Local Firestore uses synthetic data and
+a localhost emulator, never a live Google project. Install the Google Cloud Firestore emulator component
+and Java 25, then start it in a separate terminal:
+
+```powershell
+gcloud emulators firestore start --host-port=127.0.0.1:8085 --project=demo-salestrackr-local
+```
+
+After building the frontend, run:
+
+```powershell
+$env:APP_MODE = "demo"
+$env:STORAGE_BACKEND = "firestore"
+$env:FIRESTORE_PROJECT_ID = "demo-salestrackr-local"
+$env:FIRESTORE_EMULATOR_HOST = "127.0.0.1:8085"
+$env:DEMO_DATA_DIR = ".local-data\firestore-preview"
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Open **http://127.0.0.1:8000/settings**. Demo backups are ordinary ZIP files in the isolated local
+backup folder, not uploads to Google Drive. They survive a server restart; the emulator itself is
+ephemeral. Weekly preferences can be reviewed locally, but no cloud schedule is running.
+Settings is the small gear beside **Sales workspace** at the bottom of the sidebar. New ZIP backups
+contain readable `accounts.json`, `contacts.json`, `sales-records.json` and a verified manifest, with
+current data and full history. Keep only three backups total, with no protected-original exception.
+Production lists valid accessible archives from the private Drive backup folder; local preview
+uses its isolated sample backup folder instead.
+Production requires `BACKUP_DRIVE_FOLDER_ID` for the separately marked Firestore backup folder.
+There is no fallback to the existing Drive backup/data folders; migration leaves those files intact.
+
+With the emulator running, set `FIRESTORE_EMULATOR_HOST` as above and run the backend checks to include
+the real-emulator integration suite. CI starts an emulator and runs these tests automatically.
+See [Firestore layout, backup safety, and offline recovery](docs/architecture.md#firestore-backend-and-recovery).
 
 ## Deployment status
 

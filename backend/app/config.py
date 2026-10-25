@@ -12,6 +12,13 @@ class Settings:
     iap_audience: str
     public_origin: str
     seed_demo: bool
+    storage_backend: str = "drive"
+    firestore_project: str = ""
+    firestore_database: str = "(default)"
+    firestore_workspace: str = "salestrackr"
+    recovery_admins: tuple[str, ...] = ()
+    backup_schedule_ready: bool = False
+    backup_folder_id: str = ""
 
     @classmethod
     def load(cls):
@@ -28,7 +35,36 @@ class Settings:
             iap_audience=os.getenv("IAP_AUDIENCE", ""),
             public_origin=os.getenv("PUBLIC_ORIGIN", "").rstrip("/"),
             seed_demo=os.getenv("DEMO_SEED", "true").lower() == "true",
+            storage_backend=os.getenv("STORAGE_BACKEND", "drive"),
+            firestore_project=os.getenv("FIRESTORE_PROJECT_ID", ""),
+            firestore_database=os.getenv("FIRESTORE_DATABASE_ID", "(default)"),
+            firestore_workspace=os.getenv("FIRESTORE_WORKSPACE_ID", "salestrackr"),
+            recovery_admins=tuple(
+                email.strip().casefold()
+                for email in os.getenv("RECOVERY_ADMIN_EMAILS", "").split(",")
+                if email.strip()
+            ),
+            backup_schedule_ready=os.getenv("BACKUP_SCHEDULE_READY", "").lower() == "true",
+            backup_folder_id=os.getenv("BACKUP_DRIVE_FOLDER_ID", ""),
         )
+        if settings.storage_backend not in ("drive", "firestore"):
+            raise RuntimeError("STORAGE_BACKEND must be drive or firestore.")
+        if settings.storage_backend == "firestore":
+            from urllib.parse import urlsplit
+
+            emulator = os.getenv("FIRESTORE_EMULATOR_HOST", "")
+            if not settings.firestore_project:
+                raise RuntimeError("Firestore requires FIRESTORE_PROJECT_ID.")
+            if mode == "demo" and (
+                not settings.firestore_project.startswith("demo-")
+                or not emulator
+                or urlsplit(f"http://{emulator}").hostname not in ("localhost", "127.0.0.1", "::1")
+            ):
+                raise RuntimeError("Local Firestore requires a demo- project and a localhost emulator.")
+            if mode == "production" and emulator:
+                raise RuntimeError("The Firestore emulator is forbidden in production.")
+            if mode == "production" and not settings.backup_folder_id:
+                raise RuntimeError("Firestore requires a separate BACKUP_DRIVE_FOLDER_ID in production.")
         if mode == "production" and not all(
             (
                 settings.root_id,
