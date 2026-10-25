@@ -13,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
 
 from .auth import authenticate, protect_mutation
-from .backups import MAX_ARCHIVE, BackupManager
+from .backups import BACKUP_RETENTION, MAX_ARCHIVE, BackupManager
 from .config import Settings
 from .demo import seed
 from .domain import (
@@ -45,6 +45,7 @@ from .domain import (
 )
 from .firestore_storage import FirestoreRepository
 from .queries import VIEWS, account_matches, account_name_key, matches, query_records
+from .record_cleanup import CleanupWrite, RecordCleanup
 from .storage import DriveBackend, LocalBackend, Repository, digest
 from .timing import save_timing, timed_lock, timed_phase
 
@@ -65,6 +66,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     )
     indexed = isinstance(repo, FirestoreRepository)
     recovery = BackupManager(repo, settings) if indexed else None
+    cleanup = RecordCleanup(repo, recovery) if indexed else None
 
     @asynccontextmanager
     async def lifespan(app):
@@ -298,13 +300,29 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 "enabled": False, "active": False,
                 "weekday": "Sunday", "time": "02:00", "timezone": "Asia/Kolkata",
             },
-            "retention": 3, "backups": [], "lastBackupAt": None, "lastError": None,
+            "retention": BACKUP_RETENTION, "backups": [], "lastBackupAt": None, "lastError": None,
             "canBackup": False, "canRestore": False, "generation": None,
         }
 
     @app.post("/api/settings/backup-recovery")
     def recovery_preference(body: BackupPreference, request: Request):
         return require_recovery().preference(body.weeklyEnabled, request.state.actor)
+
+    @app.get("/api/settings/record-cleanup")
+    def cleanup_records(request: Request):
+        if cleanup is None:
+            return {
+                "items": [], "total": 0, "generation": None, "canDelete": False,
+                "pending": None, "cleanupInProgress": False, "lastError": None,
+            }
+        with repo.lock:
+            return cleanup.listing(request.state.actor)
+
+    @app.post("/api/settings/record-cleanup")
+    def delete_cleanup_records(body: CleanupWrite, request: Request):
+        require_recovery()
+        with repo.lock:
+            return cleanup.delete(body, request.state.actor, request.headers.get("x-salestrackr-generation"))
 
     @app.post("/api/backups")
     def create_backup(body: BackupWrite, request: Request):

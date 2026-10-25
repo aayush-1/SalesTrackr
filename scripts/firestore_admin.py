@@ -13,6 +13,7 @@ from backend.app.config import Settings
 from backend.app.domain import Problem, now
 from backend.app.firestore_storage import FirestoreRepository
 from backend.app.queries import VIEWS
+from backend.app.record_cleanup import RecordCleanup
 from backend.app.storage import DriveBackend, digest
 
 
@@ -97,12 +98,50 @@ def verify_live(repo, source, store):
 
     revisions, control = repo.snapshot()
     binding = control.get("driveMigration") or {}
-    expected = {raw["id"]: digest(raw) for raw in collect(source)["revisions"]}
+    if control.get("pendingRecordCleanup"):
+        raise Problem(
+            "Record cleanup is in progress. Retry verification afterwards.", 409, "cleanup_in_progress",
+        )
+    retired = binding.get("sourceRetirement")
+    if retired:
+        receipt = repo.workspace.collection("sourceRetirements").document(retired).get().to_dict()
+        if (
+            not receipt or receipt.get("format") != 1 or receipt.get("completed") is not True
+            or receipt.get("driveRoot") != binding.get("driveRoot")
+            or receipt.get("sourceInventoryHash") != binding.get("sourceInventoryHash")
+            or not isinstance(receipt.get("versionHashes"), dict)
+            or not isinstance(receipt.get("versionEntities"), dict)
+            or not isinstance(receipt.get("legacyFolders"), dict)
+        ):
+            raise Problem("The Drive source-retirement receipt is missing or invalid.")
+        expected = receipt["versionHashes"]
+        entities = receipt["versionEntities"]
+        folders = receipt["legacyFolders"]
+        source_inventory_hash = receipt["sourceInventoryHash"]
+    else:
+        original = collect(source)["revisions"]
+        expected = {raw["id"]: digest(raw) for raw in original}
+        entities = {raw["id"]: {
+            "entityId": raw["entityId"], "entityType": raw["entityType"],
+        } for raw in original}
+        source_inventory_hash = digest(drive_inventory(source))
+        folders = source.settings["folders"]
     actual = {raw["id"]: digest(raw) for raw in revisions}
+    removed = {
+        item.id for item in repo.workspace.collection("recordDeletions").stream()
+        if item.to_dict().get("completed") is True and item.to_dict().get("entityType") == "record"
+    }
+    def intentionally_deleted(key):
+        entity = entities.get(key) or {}
+        return entity.get("entityType") == "record" and entity.get("entityId") in removed
+
     if (
         binding.get("driveRoot") != source.root_id or binding.get("dataHash") != digest(expected)
-        or binding.get("sourceInventoryHash") != digest(drive_inventory(source))
-        or any(actual.get(key) != value for key, value in expected.items())
+        or binding.get("sourceInventoryHash") != source_inventory_hash
+        or any(
+            actual.get(key) != value and not (key not in actual and intentionally_deleted(key))
+            for key, value in expected.items()
+        )
     ):
         raise Problem("Migration/source integrity check failed. Preserve all data for investigation.")
     for view in VIEWS:
@@ -115,12 +154,13 @@ def verify_live(repo, source, store):
         repo.query_contacts(account["entityId"])
         repo.history_page(account["entityId"], "account", 0, 1)
         repo.query_records("all", "", account["entityId"], None, None, None, None, "all", 0, 1)
-    if store.folder_id in source.settings["folders"].values():
+    if not folders or store.folder_id in folders.values() or store.folder_id == source.root_id:
         raise Problem("Firestore backups must not use any existing Drive data/backup folder.")
     store._folder()
     return {
         "counts": checked_revisions(revisions), "dataHash": digest(actual),
-        "sourceFilesUnchanged": True, "sourceBackupsUnchanged": True,
+        "sourceFilesUnchanged": not bool(retired), "sourceBackupsUnchanged": not bool(retired),
+        "sourceRetired": bool(retired), "intentionallyDeletedRecords": len(removed),
         "dedicatedBackupFolder": True, "indexedViewsChecked": len(VIEWS),
     }
 
@@ -184,7 +224,20 @@ def main():
         repo = FirestoreRepository(settings)
         if args.command == "verify-live":
             source = DriveBackend(settings.token_json, settings.root_id, operator=True)
-            result = verify_live(repo, source, BackupManager(repo, settings).store)
+            manager = BackupManager(repo, settings)
+            result = verify_live(repo, source, manager.store)
+            actor = settings.recovery_admins[0] if settings.recovery_admins else "recovery-operator"
+            status = manager.status(actor)
+            cleanup = RecordCleanup(repo, manager).listing(actor)
+            result.update(
+                backupRetention=status["retention"], availableBackups=len(status["backups"]),
+                manualBackupReady=status["canBackup"], recoveryAdminReady=status["canRestore"],
+                backupStatusHealthy=not status["lastError"], recordCleanupReady=cleanup["canDelete"],
+                eligibleCleanupRecords=cleanup["total"], backupReadbackVerified=False,
+            )
+            if status["backups"]:
+                _, manifest = read_archive(manager.get(status["backups"][0]["id"])[0])
+                result.update(backupReadbackVerified=True, latestBackupCounts=manifest["counts"])
             print(json.dumps(result, sort_keys=True))
             return
         if args.scheduled and not repo.control.get("weeklyEnabled", True):

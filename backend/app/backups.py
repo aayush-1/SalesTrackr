@@ -30,6 +30,7 @@ MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_EXPANDED = 256 * 1024 * 1024
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9_-]{10,160}$")
 BACKUP_SOURCES = {"manual", "scheduled", "pre-restore", "migration"}
+BACKUP_RETENTION = 10
 BACKUP_FILES = {"account": "accounts.json", "contact": "contacts.json", "record": "sales-records.json"}
 
 
@@ -495,7 +496,7 @@ class BackupManager:
                 "active": self.settings.backup_schedule_ready and self.settings.mode == "production",
                 "weekday": "Sunday", "time": "02:00", "timezone": "Asia/Kolkata",
             },
-            "retention": 3, "backups": [{k: v for k, v in row.items() if k in (
+            "retention": BACKUP_RETENTION, "backups": [{k: v for k, v in row.items() if k in (
                 "id", "name", "createdAt", "source", "protected", "counts", "sizeBytes",
             )} for row in rows],
             "lastBackupAt": rows[0]["createdAt"] if rows else None,
@@ -582,7 +583,7 @@ class BackupManager:
         finish(self.repo.client.transaction())
 
     def _prune(self):
-        for row in self.rows()[3:]:
+        for row in self.rows()[BACKUP_RETENTION:]:
             self.get(row["id"])
             self.store.trash(row["id"])
             self._catalog().document(row["id"]).update({"pruned": True})
@@ -725,6 +726,8 @@ class BackupManager:
                 raise Problem("Restore identifier was used for different content.", 409, "write_id_reused")
             if existing and existing.get("completed"):
                 return existing
+            if control.get("pendingRecordCleanup"):
+                raise Problem("Finish the pending record cleanup before restoring.", 409, "cleanup_pending")
             if any(control[key] != preview[key] for key in ("generation", "sequence")):
                 raise Problem(
                     "Live data changed. Inspect the backup again before restoring.", 409, "preview_stale"

@@ -6,19 +6,20 @@ import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.backups import BackupManager, DriveBackupStore, archive, read_archive
+from backend.app.backups import BACKUP_RETENTION, BackupManager, DriveBackupStore, archive, read_archive
 from backend.app.config import Settings
 from backend.app.domain import STAGES, AccountData, ContactData, Problem, RecordData, Revision, now, today
 from backend.app.firestore_storage import FirestoreRepository
 from backend.app.main import create_app
 from backend.app.queries import VIEWS, query_records
+from backend.app.record_cleanup import RecordCleanup
 from backend.app.storage import digest, document
 from scripts.firestore_admin import migrate_drive, restore_empty, verify_live
 
@@ -230,10 +231,10 @@ def test_firestore_backup_roundtrip_retention_and_restore(client, repo):
     assert result["recoveryBackup"]["counts"]["account"] == 2
     with pytest.raises(Problem, match="outdated"):
         repo.check_generation(old_generation)
-    for _ in range(4):
+    for _ in range(BACKUP_RETENTION):
         manager.backup(uuid4().hex, "local-demo")
     rows = manager.rows()
-    assert len(rows) == 3
+    assert len(rows) == 10 and manager.status("local-demo")["retention"] == 10
     assert not any(row["protected"] for row in rows)
     with pytest.raises(Problem, match="no longer retained"):
         manager.get(original["id"])
@@ -308,7 +309,7 @@ def test_backup_rejects_changed_readable_entity_files():
 def test_backup_inventory_discovers_valid_files_and_does_not_prune_on_read(client, repo):
     account(repo)
     manager = client.app.state.recovery
-    for _ in range(4):
+    for _ in range(BACKUP_RETENTION + 1):
         data, _ = archive(
             repo.snapshot()[0], source="migration", operation_id=uuid4().hex,
             actor="local-demo", control=repo.control,
@@ -317,13 +318,13 @@ def test_backup_inventory_discovers_valid_files_and_does_not_prune_on_read(clien
     unrelated = uuid4().hex
     manager.store.put(unrelated, b'{"not":"a SalesTrackr backup"}', "unrelated.zip")
     status = manager.status("local-demo")
-    assert len(status["backups"]) == 4
+    assert len(status["backups"]) == 11
     assert not any(row["protected"] for row in status["backups"])
     assert unrelated not in {row["id"] for row in status["backups"]}
     assert "invalid" in status["lastError"]
-    assert len(list(manager.store.directory.glob("*.zip"))) == 5
+    assert len(list(manager.store.directory.glob("*.zip"))) == 12
     manager.backup(uuid4().hex, "local-demo", source="scheduled")
-    assert len(manager.rows()) == 3
+    assert len(manager.rows()) == 10
     assert manager.store.read(unrelated) == b'{"not":"a SalesTrackr backup"}'
 
 
@@ -331,10 +332,11 @@ def test_backup_retention_orders_timezone_aware_instants_not_timestamp_text(clie
     account(repo)
     manager = client.app.state.recovery
     backups = []
-    for created_at in (
-        "2026-10-25T21:50:00+05:30", "2026-10-25T16:21:00+00:00",
-        "2026-10-25T21:52:00+05:30", "2026-10-25T16:23:00+00:00",
-    ):
+    for index in range(BACKUP_RETENTION + 1):
+        moment = datetime(2026, 10, 25, 16, 20, tzinfo=timezone.utc) + timedelta(minutes=index)
+        if index % 2 == 0:
+            moment = moment.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        created_at = moment.isoformat()
         with patch("backend.app.backups.now", return_value=created_at):
             backups.append(manager.backup(
                 uuid4().hex, "local-demo", source="migration" if not backups else "manual",
@@ -413,7 +415,7 @@ def test_firestore_failed_restore_keeps_live_namespace_and_data(client, repo):
     first = account(repo)
     manager = client.app.state.recovery
     saved = manager.backup(uuid4().hex, "local-demo")
-    for _ in range(2):
+    for _ in range(BACKUP_RETENTION - 1):
         manager.backup(uuid4().hex, "local-demo")
     data, _ = manager.get(saved["id"])
     preview = manager.inspect(data, "local-demo")
@@ -425,14 +427,14 @@ def test_firestore_failed_restore_keeps_live_namespace_and_data(client, repo):
     assert not repo.control["maintenance"]
     assert repo.generation == original and repo.current(first["entityId"]) == first
     assert any(row["source"] == "pre-restore" for row in manager.rows())
-    assert len(manager.rows()) == 3
+    assert len(manager.rows()) == 10
 
 
 def test_selected_restore_retry_confirms_success_even_after_source_backup_rotates_out(client, repo):
     account(repo)
     manager = client.app.state.recovery
     saved = manager.backup(uuid4().hex, "local-demo")
-    for _ in range(2):
+    for _ in range(BACKUP_RETENTION - 1):
         manager.backup(uuid4().hex, "local-demo")
     data, _ = manager.get(saved["id"])
     preview = manager.inspect(data, "local-demo")
@@ -452,7 +454,7 @@ def test_selected_restore_retry_confirms_success_even_after_source_backup_rotate
     assert manager._catalog().document(saved["id"]).get().to_dict()["pruned"]
     response = client.post("/api/backups/restore", json=body, headers=headers(repo))
     assert response.status_code == 200 and response.json()["restored"]
-    assert len(manager.rows()) == 3
+    assert len(manager.rows()) == 10
     with pytest.raises(Problem, match="different content"):
         manager.completed_restore(saved["id"], body["writeId"], "another-actor", "RESTORE")
 
@@ -460,7 +462,7 @@ def test_selected_restore_retry_confirms_success_even_after_source_backup_rotate
 def test_firestore_backup_verification_failure_never_prunes_old_copies(client, repo):
     account(repo)
     manager = client.app.state.recovery
-    for _ in range(3):
+    for _ in range(BACKUP_RETENTION):
         manager.backup(uuid4().hex, "local-demo")
     previous = {row["id"] for row in manager.rows()}
     with patch.object(manager.store, "put"):
@@ -892,3 +894,238 @@ def test_live_verification_preserves_migrated_history_and_checks_untouched_sourc
     source._list.side_effect = changed
     with pytest.raises(Problem, match="integrity check failed"):
         verify_live(repo, source, store)
+
+
+@pytest.mark.parametrize("invalid", [None, "incomplete", "hash", "inventory", "root"])
+def test_live_verification_recognizes_only_bound_completed_source_retirement(repo, tmp_path, invalid):
+    first = raw()
+    source = migration_source([first])
+    with patch("scripts.firestore_admin.time.sleep"):
+        migrate_drive(source, repo, tmp_path / "source.json")
+    binding = repo.workspace.get().to_dict()["driveMigration"]
+    receipt = {
+        "format": 1, "completed": True, "driveRoot": source.root_id,
+        "sourceInventoryHash": binding["sourceInventoryHash"],
+        "versionHashes": {first["id"]: digest(first)},
+        "versionEntities": {first["id"]: {
+            "entityId": first["entityId"], "entityType": first["entityType"],
+        }},
+        "legacyFolders": source.settings["folders"],
+    }
+    if invalid == "incomplete":
+        receipt["completed"] = False
+    elif invalid == "hash":
+        receipt["versionHashes"] = {}
+    elif invalid == "inventory":
+        receipt["sourceInventoryHash"] = "changed"
+    elif invalid == "root":
+        receipt["driveRoot"] = "different-root"
+    repo.workspace.collection("sourceRetirements").document("retirement").set(receipt)
+    repo.workspace.update({"driveMigration.sourceRetirement": "retirement"})
+    source._folders.side_effect = AssertionError("A retired source must not be accessed")
+    source._list.side_effect = AssertionError("A retired source must not be accessed")
+    source.get.side_effect = AssertionError("A retired source must not be accessed")
+    store = Mock(folder_id="new-firestore-backup-folder")
+    if invalid:
+        with pytest.raises(Problem):
+            verify_live(repo, source, store)
+    else:
+        result = verify_live(repo, source, store)
+        assert result["sourceRetired"] and not result["sourceFilesUnchanged"]
+        assert result["counts"]["revisions"] == 1
+        with patch.object(repo, "snapshot", return_value=([], repo.workspace.get().to_dict())):
+            with pytest.raises(Problem, match="integrity check failed"):
+                verify_live(repo, source, store)
+
+
+def cleanup_record(repo, account_id, state="complete"):
+    closed = state in ("complete", "closed")
+    data = RecordData(
+        accountId=account_id, productNotes=f"Cleanup sample: {state}", workflowVersion=3,
+        stageDates={stage: today() for stage in (STAGES if closed else STAGES[:1])},
+        paymentReceived=closed, paymentReceivedOn=today() if closed else None,
+        feedbackReceived=state == "complete", feedbackReceivedOn=today() if state == "complete" else None,
+        discarded=state == "discarded", discardNote="No longer needed" if state == "discarded" else "",
+        discardedOn=today() if state == "discarded" else None,
+    ).model_dump(mode="json")
+    return repo.commit(raw("record", data=data))["revision"]
+
+
+def cleanup_body(*records):
+    return {
+        "writeId": uuid4().hex, "confirmation": "DELETE",
+        "records": [{"entityId": record["entityId"], "baseRevision": record["id"]} for record in records],
+    }
+
+
+def test_record_cleanup_lists_only_eligible_records_and_physically_reclaims_all_generations(client, repo):
+    owner = account(repo)
+    contact = repo.commit(raw("contact", data=ContactData(
+        accountId=owner["entityId"], name="Retained contact",
+    ).model_dump(mode="json")))["revision"]
+    complete = cleanup_record(repo, owner["entityId"])
+    discarded = cleanup_record(repo, owner["entityId"], "discarded")
+    awaiting = cleanup_record(repo, owner["entityId"], "closed")
+    active = cleanup_record(repo, owner["entityId"], "active")
+    edited = repo.commit(raw(
+        "record", complete["entityId"], {**complete["data"], "notes": "Saved history"},
+        parents=[complete["id"]],
+    ))["revision"]
+    all_raw, _ = repo.snapshot()
+    older, _ = repo.stage(all_raw)
+    original_hashes = {item["id"]: digest(item) for item in all_raw}
+    selected = {complete["entityId"], discarded["entityId"]}
+    removed = [item for item in all_raw if item["entityId"] in selected]
+    backup = client.post(
+        "/api/backups", json={"writeId": uuid4().hex}, headers=headers(repo),
+    ).json()["backup"]
+    archive_before = client.get(f"/api/backups/{backup['id']}/download").content
+    result = client.get("/api/settings/record-cleanup").json()
+    assert {row["entityId"] for row in result["items"]} == selected and result["canDelete"]
+    assert all(row["baseRevision"] in (edited["id"], discarded["id"]) for row in result["items"])
+    generation = repo.generation
+    body = cleanup_body(edited, discarded)
+    response = client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+    assert response.status_code == 200, response.text
+    assert response.json()["deletedCount"] == 2 and response.json()["savedVersionsRemoved"] == 3
+    assert set(response.json()["deletedIds"]) == selected
+    remaining = repo.snapshot()[0]
+    assert {item["id"]: digest(item) for item in remaining} == {
+        key: value for key, value in original_hashes.items() if key not in {item["id"] for item in removed}
+    }
+    assert repo.generation == generation and repo.control["entityCounts"] == {
+        "account": 1, "contact": 1, "record": 2,
+    }
+    for record in (owner, contact, awaiting, active):
+        assert repo.current(record["entityId"]) == record
+    for record in (edited, discarded):
+        assert client.get(f"/api/records/{record['entityId']}/detail").status_code == 404
+        assert not older.collection("entities").document(record["entityId"]).get().exists
+    for version in removed:
+        payload = repo.workspace.collection("payloads").document(digest(version))
+        assert not payload.get().exists and not list(payload.collections())
+        assert not older.collection("revisions").document(version["id"]).get().exists
+    assert client.get(f"/api/backups/{backup['id']}/download").content == archive_before
+    retry = client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+    assert retry.status_code == 200 and retry.json() == response.json()
+    assert repo.control["entityCounts"]["record"] == 2
+    assert client.get("/api/settings/record-cleanup").json()["items"] == []
+    with pytest.raises(Problem, match="permanently deleted"):
+        repo.commit(raw("record", complete["entityId"], complete["data"]))
+
+
+@pytest.mark.parametrize("state", ["closed", "active"])
+def test_record_cleanup_rejects_ineligible_selection_without_deleting_anything(client, repo, state):
+    owner = account(repo)
+    complete = cleanup_record(repo, owner["entityId"])
+    protected = cleanup_record(repo, owner["entityId"], state)
+    before = repo.snapshot()[0]
+    response = client.post(
+        "/api/settings/record-cleanup", json=cleanup_body(complete, protected), headers=headers(repo),
+    )
+    assert response.status_code == 409 and response.json()["error"]["code"] == "cleanup_ineligible"
+    assert repo.snapshot()[0] == before
+    assert not repo.workspace.get().to_dict().get("pendingRecordCleanup")
+
+
+def test_record_cleanup_rejects_stale_selection_and_requires_confirmation_generation_and_admin(client, repo):
+    owner = account(repo)
+    record = cleanup_record(repo, owner["entityId"])
+    body = cleanup_body(record)
+    response = client.post(
+        "/api/settings/record-cleanup", json={**body, "confirmation": ""}, headers=headers(repo),
+    )
+    assert response.status_code == 422
+    response = client.post(
+        "/api/settings/record-cleanup", json=body, headers={"X-SalesTrackr-Request": "1"},
+    )
+    assert response.status_code == 409
+    with patch.object(client.app.state.recovery, "admin", return_value=False):
+        assert not client.get("/api/settings/record-cleanup").json()["canDelete"]
+        response = client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+        assert response.status_code == 403
+    repo.commit(raw(
+        "record", record["entityId"], {**record["data"], "notes": "Changed"}, parents=[record["id"]],
+    ))
+    response = client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+    assert response.status_code == 409 and response.json()["error"]["code"] == "stale_edit"
+    assert repo.control["entityCounts"]["record"] == 1
+    body["records"].append(body["records"][0])
+    assert client.post("/api/settings/record-cleanup", json=body, headers=headers(repo)).status_code == 422
+
+
+def test_record_cleanup_interruption_is_discoverable_snapshot_safe_and_restartable(client, repo):
+    owner = account(repo)
+    record = cleanup_record(repo, owner["entityId"])
+    body = cleanup_body(record)
+    with patch.object(RecordCleanup, "_purge_payload", side_effect=OSError("Interrupted purge")):
+        with pytest.raises(OSError, match="Interrupted purge"):
+            client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+    status = client.get("/api/settings/record-cleanup").json()
+    assert status["pending"] == body and status["cleanupInProgress"] and status["lastError"]
+    assert {row["entityId"] for row in repo.snapshot()[0]} == {owner["entityId"]}
+    assert repo.control["entityCounts"]["record"] == 0
+    new = client.post("/api/settings/record-cleanup", json=cleanup_body(record), headers=headers(repo))
+    assert new.status_code == 409
+    recovery = client.app.state.recovery
+    data, _ = archive(
+        [owner], source="manual", operation_id=uuid4().hex, actor="local-demo", control=repo.control,
+    )
+    preview = recovery.inspect(data, "local-demo")
+    with pytest.raises(Problem, match="pending record cleanup"):
+        recovery.restore(data, "local-demo", preview["token"], "RESTORE", uuid4().hex)
+    response = client.post("/api/settings/record-cleanup", json=body, headers=headers(repo))
+    assert response.status_code == 200, response.text
+    assert response.json()["deletedCount"] == 1 and response.json()["savedVersionsRemoved"] == 1
+    assert not client.get("/api/settings/record-cleanup").json()["pending"]
+    assert repo.current(owner["entityId"]) == owner
+    assert not repo.workspace.collection("payloads").document(digest(record)).get().exists
+
+
+def test_record_cleanup_cannot_interrupt_a_running_backup(client, repo):
+    owner = account(repo)
+    record = cleanup_record(repo, owner["entityId"])
+    repo.workspace.update({"backupLease": {"expires": 10**12, "owner": "another-backup"}})
+    response = client.post("/api/settings/record-cleanup", json=cleanup_body(record), headers=headers(repo))
+    assert response.status_code == 409 and response.json()["error"]["code"] == "backup_in_progress"
+    assert repo.current(record["entityId"]) == record
+
+
+def test_migration_verification_accepts_only_completed_intentional_record_deletions(client, repo, tmp_path):
+    owner = account(repo)
+    record = cleanup_record(repo, owner["entityId"])
+    versions, _ = repo.snapshot()
+    repo.workspace.update({"driveMigration": {
+        "driveRoot": "source-root", "dataHash": digest({row["id"]: digest(row) for row in versions}),
+        "sourceInventoryHash": digest({"placeholder": True}),
+    }})
+    source = migration_source(versions)
+    from scripts.firestore_admin import drive_inventory
+    repo.workspace.update({"driveMigration.sourceInventoryHash": digest(drive_inventory(source))})
+    store = Mock(folder_id="new-firestore-backup-folder")
+    response = client.post("/api/settings/record-cleanup", json=cleanup_body(record), headers=headers(repo))
+    assert response.status_code == 200, response.text
+    assert verify_live(repo, source, store)["intentionallyDeletedRecords"] == 1
+    marker = repo.workspace.collection("recordDeletions").document(record["entityId"])
+    marker.update({"completed": False})
+    with pytest.raises(Problem, match="integrity check failed"):
+        verify_live(repo, source, store)
+
+
+def test_cleanup_fences_every_payload_chunk_and_resumes_beyond_one_write_batch(repo, settings):
+    payload = repo.workspace.collection("payloads").document("a" * 64)
+    payload.set({"test": True})
+    batch = repo.client.batch()
+    for index in range(401):
+        batch.set(payload.collection("parts").document(str(index).zfill(4)), {"data": b"x"})
+    batch.commit()
+    cleanup = RecordCleanup(repo, BackupManager(repo, settings))
+    guard = Mock(side_effect=[None, Problem("Ownership changed", 409, "cleanup_pending")])
+    with pytest.raises(Problem, match="Ownership changed"):
+        cleanup._purge_payload(payload, guard)
+    assert guard.call_count == 2
+    assert payload.get().exists and len(list(payload.collection("parts").stream())) == 1
+    guard = Mock()
+    cleanup._purge_payload(payload, guard)
+    assert guard.call_count == 1
+    assert not payload.get().exists and not list(payload.collections())

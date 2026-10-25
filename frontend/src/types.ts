@@ -65,11 +65,22 @@ export interface BackupSettings {
   mode: 'demo' | 'production'; storageBackend: 'drive' | 'firestore';
   location: string; folderUrl: string | null;
   schedule: { enabled: boolean; active?: boolean; weekday: 'Sunday'; time: '02:00'; timezone: 'Asia/Kolkata' };
-  retention: 3; backups: Backup[]; lastBackupAt: string | null; lastError: string | null;
+  retention: 10; backups: Backup[]; lastBackupAt: string | null; lastError: string | null;
   canBackup: boolean; canRestore: boolean; generation: string | null;
 }
 export interface BackupPreview {
   token: string; backup: Backup; generation: string; warnings: string[]; expiresAt: string;
+}
+export interface CleanupSelection { entityId: string; baseRevision: string }
+export interface CleanupRequest { writeId: string; records: CleanupSelection[]; confirmation: 'DELETE' }
+export interface CleanupSettings {
+  items: (CleanupSelection & { accountName: string; productNotes: string; discarded: boolean; closedOn: string | null })[];
+  total: number; generation: string | null; canDelete: boolean;
+  pending: CleanupRequest | null; cleanupInProgress: boolean; lastError: string | null;
+}
+export interface CleanupResult {
+  deletedIds: string[]; deletedCount: number; savedVersionsRemoved: number;
+  kept: { entityId: string; reason: string }[];
 }
 export interface Dashboard extends Meta { counts: Record<string, number> }
 export const views: Record<string, { title: string; description: string; stages: readonly Stage[] }> = {

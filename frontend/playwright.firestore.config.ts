@@ -7,7 +7,7 @@ const python = process.platform === 'win32' ? '.venv\\Scripts\\python.exe' : '.v
 const workspace = `browser-e2e-${process.pid}-${Date.now()}`;
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'firestore-backup.spec.ts',
+  testMatch: /(?:firestore-backup|record-cleanup)\.spec\.ts/,
   outputDir: path.join(root, '.local-data', 'browser-firestore-results', workspace),
   workers: 1,
   timeout: 120_000,
