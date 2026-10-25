@@ -4,7 +4,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams, useSearchP
 import { allAccounts, RefreshContext, useResource, useSave } from '../api';
 import { Alert, Back, Field, Loading, Modal, PageHeader, PaymentBadge, SaveButton, StageBadge, Timeline, TrackedForm, formValues, markFormSaved } from '../components';
 import { currentStage, formatDate, labels, stages } from '../types';
-import type { Account, Contact, Detail, Me, Page, Revision, SalesRecord } from '../types';
+import type { Account, Contact, Me, Page, RecordWorkspace, Revision, SalesRecord } from '../types';
 import { AccountForm } from './accounts';
 
 export function NewRecordPage() {
@@ -220,9 +220,7 @@ function RecordHistory({ id }: { id: string }) {
 export function RecordDetail() {
   const { id } = useParams();
   const location = useLocation();
-  const { data, error, loading } = useResource<Detail<SalesRecord>>(`/entities/record/${id}`);
-  const account = useResource<Detail<Account>>(data ? `/entities/account/${data.revision.data.accountId}` : null);
-  const contact = useResource<Detail<Contact>>(data?.revision.data.contactId ? `/entities/contact/${data.revision.data.contactId}` : null);
+  const { data, error, loading } = useResource<RecordWorkspace>(`/records/${id}/detail`);
   const [action, setAction] = useState<Action | null>(null);
   const [notice, setNotice] = useState<string | null>(location.state?.notice || null);
   const [paymentDraft, setPaymentDraft] = useState<{ entityId: string; note: string } | null>(null);
@@ -232,11 +230,12 @@ export function RecordDetail() {
     {data && (() => {
       const row = data.revision;
       const record = row.data;
+      const { account, contact, errors } = data.related;
       const current = currentStage(record);
       const next = stages[stages.indexOf(current) + 1];
       return <>
-        <PageHeader eyebrow={`SALES RECORD · ${row.entityId.slice(0, 8).toUpperCase()}`} title={account.data?.revision.data.name || (account.error ? 'Company unavailable' : 'Loading company...')}
-          description={account.data ? account.data.revision.data.address || 'Location not added' : undefined}
+        <PageHeader eyebrow={`SALES RECORD · ${row.entityId.slice(0, 8).toUpperCase()}`} title={account?.data.name || 'Company unavailable'}
+          description={account ? account.data.address || 'Location not added' : undefined}
           action={!record.discarded && <div className="actions">
             <button className="button" onClick={() => setAction('edit')}><Pencil size={15} />Edit details</button>
             <button className="button danger" onClick={() => {
@@ -257,10 +256,10 @@ export function RecordDetail() {
         </section>
         <div className="record-columns">
           <div><section className="panel details-panel"><h2>Enquiry details</h2><dl className="details-grid">
-            <div><dt><Building2 size={14} />Account</dt><dd><Link to={`/accounts/${record.accountId}`}>{account.data?.revision.data.name || 'View account'}</Link></dd></div>
+            <div><dt><Building2 size={14} />Account</dt><dd><Link to={`/accounts/${record.accountId}`}>{account?.data.name || 'View account'}</Link></dd></div>
             <div><dt><CalendarDays size={14} />Lead acquired</dt><dd>{formatDate(record.stageDates.new_lead)}</dd></div>
-            <div><dt>Contact person</dt><dd>{contact.data?.revision.data.name || 'Not selected'}</dd></div><div><dt>Quotation number</dt><dd>{record.quotationReference || 'Not added'}</dd></div>
-          </dl>{account.error && <Alert>{account.error}</Alert>}{contact.error && <Alert>{contact.error}</Alert>}
+            <div><dt>Contact person</dt><dd>{contact?.data.name || 'Not selected'}</dd></div><div><dt>Quotation number</dt><dd>{record.quotationReference || 'Not added'}</dd></div>
+          </dl>{errors.account && <Alert>{errors.account}</Alert>}{errors.contact && <Alert>{errors.contact}</Alert>}
             <div className="note-block"><div className="note-heading"><h3>Product / requirement notes</h3>
               {!record.discarded && <button className="text-button" aria-label="Edit product / requirement notes" onClick={() => setAction('product')}><Pencil size={14} />Edit</button>}
             </div><p className="pre-wrap">{record.productNotes || 'No product notes yet.'}</p></div>

@@ -126,13 +126,33 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             if contact["data"]["accountId"] != data["accountId"]:
                 raise Problem("Choose a contact belonging to this account.")
 
+    def record_relations(data):
+        related = {"account": None, "contact": None, "errors": {}}
+        for kind in ("account", "contact"):
+            entity_id = data.get(f"{kind}Id")
+            if entity_id:
+                try:
+                    related[kind] = repo.current(entity_id, kind)
+                except Problem as error:
+                    related["errors"][kind] = error.message
+        return related
+
+    def saved_response(result):
+        revision = result["revision"]
+        return {
+            **result,
+            **metadata(),
+            "revisionIsCurrent": repo.heads.get(revision["entityId"]) == {revision["id"]},
+            **({"related": record_relations(revision["data"])} if revision["entityType"] == "record" else {}),
+        }
+
     def mutate(kind, write, action, request, transform, create=False):
         with repo.lock:
             repo.sync(force=True)
             fingerprint = digest({"kind": kind, "action": action, "write": write.model_dump(mode="json")})
             prior = repo.prior_write(write.writeId, fingerprint, request.state.actor, write.entityId)
             if prior:
-                return {"revision": prior, "warning": None, **metadata()}
+                return saved_response({"revision": prior, "warning": None})
             old = None if create else repo.current(write.entityId, kind)
             if create and (write.baseRevision is not None or write.entityId in repo.heads):
                 raise Problem("That record already exists.", 409, "record_exists")
@@ -168,7 +188,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 ]
                 if duplicates:
                     result["warning"] = "Saved. Another account has the same name; check for duplicates."
-            return {**result, **metadata()}
+            return saved_response(result)
 
     @app.get("/healthz")
     def health():
@@ -277,6 +297,13 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             )
 
         return mutate("record", body, "create_record", request, transform, create=True)
+
+    @app.get("/api/records/{entity_id}/detail")
+    def record_detail(entity_id: str):
+        with repo.lock:
+            repo.sync(force=True)
+            revision = repo.current(entity_id, "record")
+            return {"revision": revision, "related": record_relations(revision["data"]), **metadata()}
 
     @app.patch("/api/records/{entity_id}")
     def edit_record(entity_id: str, body: Write[RecordFields], request: Request):

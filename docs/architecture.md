@@ -14,6 +14,14 @@ Sources:
 - `backend\app\queries.py`: the shared predicates for cards and lists.
 - `frontend\src\pages`: account, sales, collection, history, and conflict screens.
 
+## Fetch and save efficiency
+
+`GET /api/records/{id}/detail` returns the sales record and its linked account/contact after one forced synchronization. Missing or conflicting linked entities are reported individually without hiding the sale. Historical versions still load through the separately validated history endpoint.
+
+Mutation responses indicate whether the saved revision is still current and include linked details for sales records. The UI can reuse a complete, warning-free confirmation to update the matching detail and synchronization status without immediately fetching them again. Superseded retries, incomplete synchronization, warnings, unknown response flags, and manual refresh all retain normal server revalidation. Lists and history still refresh after saves; an unrelated or newer detail is never replaced with an older save result.
+
+Drive change replay downloads a repeated file only once for the same reported Drive version within that replay. Changed or missing versions, removals, and subsequent replays still read and validate the file. Pre-save and post-save synchronization, maintenance checks, the existing read-cache interval, ETag preconditions, retry identifiers, and immutable-history validation are unchanged.
+
 ## One sales record, many views
 
 Sales records display the linked account's current company name and location/address, not a separate enquiry title. Multiple records for the same company remain separate enquiries; their product notes, acquired dates, and IDs distinguish them. Updating the account updates these display values without rewriting sales history. Legacy titles remain readable in stored revisions, but are not required or edited by the app.

@@ -1,5 +1,103 @@
 import { expect, test } from '@playwright/test';
 
+test('record loads are bundled and confirmed saves avoid redundant refetches', async ({ page }) => {
+  test.setTimeout(60000);
+  const headers = { 'X-SalesTrackr-Request': '1' };
+  const create = async (kind: string, data: object) => {
+    const ticket = await (await page.request.post('/api/writes/prepare', {
+      headers, data: { entityType: kind },
+    })).json();
+    const response = await page.request.post(`/api/${kind}s`, {
+      headers, data: { ...ticket, baseRevision: null, data },
+    });
+    expect(response.ok()).toBe(true);
+    return (await response.json()).revision;
+  };
+  const company = `Request count example ${Date.now()}`;
+  const account = await create('account', { name: company, address: 'Request count city' });
+  const contact = await create('contact', { accountId: account.entityId, name: 'Request count contact' });
+  const row = await create('record', { accountId: account.entityId, contactId: contact.entityId, productNotes: 'Original requirement' });
+  const gets: string[] = [];
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'GET' && path.startsWith('/api/')) gets.push(path);
+  });
+  const detailPath = `/api/records/${row.entityId}/detail`;
+  const historyPath = `/api/entities/record/${row.entityId}/history`;
+  await page.goto(`/records/${row.entityId}`);
+  await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+  await expect(page.getByText('Request count contact', { exact: true })).toBeVisible();
+  await expect(page.locator('.history-item')).toHaveCount(1);
+  await expect(page.locator('.loading')).toHaveCount(0);
+  expect(gets.filter(path => path === detailPath)).toHaveLength(1);
+  expect(gets.some(path => /^\/api\/entities\/(account|contact)\//.test(path))).toBe(false);
+  gets.length = 0;
+  await page.route(`**${detailPath}`, route => route.abort());
+  await page.route('**/api/status', route => route.abort());
+  await page.getByRole('button', { name: 'Edit product / requirement notes', exact: true }).click();
+  await page.getByLabel('Product / requirement notes', { exact: true }).fill('Updated without refetching the sale.');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.note-block').first()).toContainText('Updated without refetching the sale.');
+  await expect(page.locator('.history-item')).toHaveCount(2);
+  await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+  await expect(page.getByText('Connection check failed:', { exact: false })).toHaveCount(0);
+  expect(gets.filter(path => path === detailPath || path === '/api/status')).toEqual([]);
+  expect(gets.filter(path => path === historyPath)).toHaveLength(1);
+  await page.unroute(`**${detailPath}`);
+  await page.unroute('**/api/status');
+  gets.length = 0;
+  await page.getByRole('button', { name: 'Refresh data', exact: true }).click();
+  await expect.poll(() => gets.filter(path => path === detailPath).length).toBe(1);
+  await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+  expect(gets.filter(path => path === '/api/status')).toHaveLength(1);
+
+  let versions = 2;
+  for (const patch of [
+    { warning: 'Saved, but synchronization is pending.' },
+    { complete: false },
+    { revisionIsCurrent: false },
+    { revisionIsCurrent: undefined },
+    { revision: row },
+  ]) {
+    gets.length = 0;
+    await page.route(`**/api/records/${row.entityId}/product-notes`, async route => {
+      const response = await route.fetch();
+      await route.fulfill({ response, json: { ...await response.json(), ...patch } });
+    });
+    await page.getByRole('button', { name: 'Edit product / requirement notes', exact: true }).click();
+    await page.getByLabel('Product / requirement notes', { exact: true }).fill(`Revalidated requirement ${versions}`);
+    await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.locator('.history-item')).toHaveCount(++versions);
+    await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+    await expect.poll(() => gets.filter(path => path === detailPath).length).toBe(1);
+    expect(gets.filter(path => path === '/api/status')).toHaveLength('revision' in patch ? 0 : 1);
+    await page.unroute(`**/api/records/${row.entityId}/product-notes`);
+  }
+  gets.length = 0;
+  let unconfirmed = true;
+  await page.route(`**/api/records/${row.entityId}/product-notes`, async route => {
+    const response = await route.fetch();
+    if (unconfirmed) {
+      unconfirmed = false;
+      await route.fulfill({ status: 503, json: { error: { message: 'Synthetic unconfirmed save.', code: 'save_unknown' } } });
+    } else {
+      await route.fulfill({ response });
+    }
+  });
+  await page.getByRole('button', { name: 'Edit product / requirement notes', exact: true }).click();
+  await page.getByLabel('Product / requirement notes', { exact: true }).fill('Retry keeps one saved revision.');
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('Synthetic unconfirmed save.');
+  expect(gets.filter(path => path === detailPath || path === '/api/status')).toEqual([]);
+  await page.getByRole('button', { name: 'Save changes', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.note-block').first()).toContainText('Retry keeps one saved revision.');
+  await expect(page.locator('.history-item')).toHaveCount(++versions);
+  expect(gets.filter(path => path === detailPath || path === '/api/status')).toEqual([]);
+});
+
 test('sample workspace and mobile navigation', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -211,11 +309,12 @@ test('follow-up and notes do not advance a stage', async ({ page }) => {
   await page.getByRole('button', { name: 'Edit details' }).click();
   await expect(page.getByLabel('Title *', { exact: true })).toHaveCount(0);
   const contact = await page.getByLabel('Contact', { exact: true }).inputValue();
+  const contactName = await page.getByLabel('Contact', { exact: true }).locator('option:checked').innerText();
   await page.getByLabel('General notes', { exact: true }).fill('Updated notes without changing dates.');
   await page.getByRole('button', { name: 'Save changes' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   expect(await page.locator('.stages').innerText()).toBe(stagesBefore);
-  if (contact) await expect(page.getByText('Demo contact', { exact: true })).toBeVisible();
+  if (contact) await expect(page.getByText(contactName, { exact: true })).toBeVisible();
 });
 
 test('sales filters use acquisition dates and only relevant current stages', async ({ page }) => {

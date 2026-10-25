@@ -1,4 +1,5 @@
 from datetime import timedelta
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -75,6 +76,89 @@ def advance(client, revision, stage, **extra):
     )
     assert response.status_code == 200, response.text
     return response.json()["revision"]
+
+
+def test_record_detail_bundles_linked_data_with_one_synchronization(client):
+    row = new_sale(client)
+    response, _ = write(
+        client, "contact", {"accountId": row["data"]["accountId"], "name": "Example contact"}
+    )
+    contact = response.json()["revision"]
+    response, _ = write(
+        client, "record",
+        {"accountId": row["data"]["accountId"], "contactId": contact["entityId"]},
+        f"/api/records/{row['entityId']}", row, method="PATCH",
+    )
+    assert response.status_code == 200, response.text
+    saved = response.json()
+    row = saved["revision"]
+    assert saved["revisionIsCurrent"] is True
+    assert saved["related"]["contact"] == contact
+    repo = client.app.state.repo
+    with patch.object(repo, "sync", wraps=repo.sync) as sync:
+        for kind, entity_id in (
+            ("record", row["entityId"]),
+            ("account", row["data"]["accountId"]),
+            ("contact", contact["entityId"]),
+        ):
+            assert client.get(f"/api/entities/{kind}/{entity_id}").status_code == 200
+        assert sync.call_count == 3
+        sync.reset_mock()
+        with patch.object(repo, "read_history", wraps=repo.read_history) as history:
+            response = client.get(f"/api/records/{row['entityId']}/detail")
+            assert response.status_code == 200, response.text
+            sync.assert_called_once_with(force=True)
+            history.assert_not_called()
+    detail = response.json()
+    assert detail["revision"] == row
+    assert detail["related"] == saved["related"]
+    assert detail["related"]["account"] == repo.current(row["data"]["accountId"], "account")
+    assert detail["related"]["errors"] == {}
+    assert detail["complete"] is True
+
+
+def test_record_detail_retains_link_errors_without_hiding_the_sale(client):
+    row = new_sale(client)
+    repo = client.app.state.repo
+    current = repo.current
+
+    def missing_account(entity_id, kind=None):
+        if kind == "account":
+            raise Problem("Account has conflicting versions.", 409, "record_conflict")
+        return current(entity_id, kind)
+
+    with patch.object(repo, "current", side_effect=missing_account):
+        response = client.get(f"/api/records/{row['entityId']}/detail")
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["revision"] == row
+    assert result["related"] == {
+        "account": None, "contact": None, "errors": {"account": "Account has conflicting versions."}
+    }
+    assert client.get(f"/api/records/{uuid4().hex}/detail").status_code == 404
+
+
+def test_save_retry_identifies_a_superseded_revision(client):
+    original = new_sale(client)
+    route = f"/api/records/{original['entityId']}/product-notes"
+    response, body = write(
+        client, "record", {"productNotes": "First update"}, route, original, method="PATCH"
+    )
+    assert response.status_code == 200, response.text
+    first = response.json()["revision"]
+    assert response.json()["revisionIsCurrent"] is True
+    response, _ = write(
+        client, "record", {"productNotes": "Newer update"}, route, first, method="PATCH"
+    )
+    assert response.status_code == 200, response.text
+    newest = response.json()["revision"]
+    retry = client.patch(route, json=body, headers=HEADERS)
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["revision"] == first
+    assert retry.json()["revisionIsCurrent"] is False
+    detail = client.get(f"/api/records/{original['entityId']}/detail").json()
+    assert detail["revision"] == newest
+    assert client.get(f"/api/entities/record/{original['entityId']}/history").json()["total"] == 3
 
 
 def test_full_journey_and_independent_payment(client):

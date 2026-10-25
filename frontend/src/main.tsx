@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { RefreshContext, useResource } from './api';
 import { Alert } from './components';
-import type { Me, Meta } from './types';
+import type { Me, Meta, Save } from './types';
 import { views } from './types';
 import { AccountDetail, AccountForm, Accounts } from './pages/accounts';
 import { Conflicts, DashboardPage, Records } from './pages/lists';
@@ -15,9 +15,9 @@ import { NewRecordPage, RecordDetail } from './pages/record';
 import './styles.css';
 
 function Shell() {
-  const [version, setVersion] = useState(0);
-  const refresh = useCallback(() => setVersion(v => v + 1), []);
-  return <RefreshContext.Provider value={{ version, refresh }}><Workspace onRefresh={refresh} /></RefreshContext.Provider>;
+  const [state, setState] = useState<{ version: number; lastSave: Save<unknown> | null }>({ version: 0, lastSave: null });
+  const refresh = useCallback((lastSave?: Save<unknown>) => setState(old => ({ version: old.version + 1, lastSave: lastSave ?? null })), []);
+  return <RefreshContext.Provider value={{ ...state, refresh }}><Workspace onRefresh={() => refresh()} /></RefreshContext.Provider>;
 }
 function Workspace({ onRefresh }: { onRefresh: () => void }) {
   const identity = useResource<Me>('/me');
