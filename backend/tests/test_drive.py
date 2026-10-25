@@ -1,3 +1,4 @@
+import hashlib
 import json
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -9,9 +10,10 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import HttpMockSequence
 from httplib2 import Response
 
-from backend.app.domain import AccountData, Problem, RecordData, Revision, now, today
+from backend.app.domain import AccountData, ContactData, Problem, RecordData, Revision, now, today
 from backend.app.queries import query_records
 from backend.app.storage import DriveBackend, Repository, digest, document
+from backend.app.timing import save_timing
 
 
 def backend():
@@ -24,6 +26,7 @@ def backend():
     result.settings = {"schemaVersion": 2, "checkpointId": "fixed-checkpoint"}
     result.entity_files = {}
     result.file_versions = {}
+    result.confirmed_writes = {}
     result._folders = MagicMock(return_value=result.folders)
     return result
 
@@ -256,11 +259,238 @@ def test_refresh_failure_is_actionable():
 
 def test_versioned_read_rejects_content_changed_during_download():
     drive = backend()
-    drive.etag = MagicMock(side_effect=['"before"', '"after"'])
-    drive.get = MagicMock(return_value=document([rev()]))
+    drive.conditional_service.files.return_value.get.return_value.execute.return_value = {
+        "etag": '"before"',
+    }
+    drive.etag = MagicMock(return_value='"after"')
+    drive._download = MagicMock(return_value=json.dumps(document([rev()])).encode())
     with pytest.raises(Problem) as error:
         drive.versioned_get("synthetic-file")
     assert error.value.code == "stale_edit"
+
+
+def test_versioned_read_binds_download_to_resource_etag_in_two_calls():
+    drive = backend()
+    value = document([rev()])
+    payload = json.dumps(value, indent=2, ensure_ascii=False).encode()
+    drive.conditional_service.files.return_value.get.return_value.execute.return_value = {
+        "etag": '"resource-etag"',
+        "md5Checksum": hashlib.md5(payload, usedforsecurity=False).hexdigest(),
+    }
+    drive.service.files.return_value.get_media.return_value.execute.return_value = payload
+    assert drive.versioned_get("synthetic-file") == (value, '"resource-etag"')
+    drive.conditional_service.files.return_value.get.return_value.execute.assert_called_once_with(
+        num_retries=3
+    )
+    drive.service.files.return_value.get_media.return_value.execute.assert_called_once_with(
+        num_retries=3
+    )
+    assert drive.conditional_service.files.return_value.get.call_args.kwargs["fields"] == "etag,md5Checksum"
+
+
+def test_versioned_read_rejects_checksum_mismatch_before_writing():
+    drive = backend()
+    drive.conditional_service.files.return_value.get.return_value.execute.return_value = {
+        "etag": '"resource-etag"', "md5Checksum": "0" * 32,
+    }
+    drive._download = MagicMock(return_value=json.dumps(document([rev()])).encode())
+    with pytest.raises(Problem) as error:
+        drive.versioned_get("synthetic-file")
+    assert error.value.code == "stale_edit"
+    drive.conditional_service.files.return_value.update.assert_not_called()
+
+
+def test_versioned_read_without_checksum_retains_three_request_guard():
+    drive = backend()
+    value = document([rev()])
+    call = drive.conditional_service.files.return_value.get.return_value.execute
+    call.side_effect = [{"etag": '"same"'}, {"etag": '"same"'}]
+    drive.service.files.return_value.get_media.return_value.execute.return_value = json.dumps(value).encode()
+    assert drive.versioned_get("synthetic-file") == (value, '"same"')
+    assert call.call_count == 2
+    drive.service.files.return_value.get_media.return_value.execute.assert_called_once_with(num_retries=3)
+
+
+@pytest.mark.parametrize("updating", [False, True])
+def test_confirmed_write_reuses_exact_version_once_without_downloading(updating, caplog):
+    drive = backend()
+    first = rev()
+    if updating:
+        drive.entity_files[first["entityId"]] = first["entityId"]
+        drive.versioned_get = MagicMock(return_value=(document([first]), '"before"'))
+        saved = rev(first["entityId"], [first["id"]])
+        operation = drive.conditional_service.files.return_value.update
+        request = operation.return_value
+        request.headers = {}
+    else:
+        saved = first
+        operation = drive.service.files.return_value.create
+        request = operation.return_value
+    request.execute.return_value = {"id": saved["entityId"], "version": "12"}
+    drive.get = MagicMock(side_effect=AssertionError("Confirmed content should not be downloaded."))
+    metadata = {"fileId": saved["entityId"], "file": {"parents": ["a"], "version": "12"}}
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "changes": [metadata, metadata], "newStartPageToken": "p2",
+    }
+    with caplog.at_level("INFO", logger="uvicorn.error.salestrackr"), save_timing("account", "test"):
+        assert drive.create(saved) == saved
+        assert len(drive.confirmed_writes) == 1
+        revisions, _, removed = drive.changes("p1")
+        assert revisions == ([first, saved] if updating else [saved])
+        assert removed == [] and drive.confirmed_writes == {}
+    metrics = json.loads(caplog.records[-1].message.split("save_timing ", 1)[1])
+    assert metrics["confirmedReuses"] == 1
+    assert metrics["driveCalls"] == 2
+    assert operation.call_args.kwargs["fields"] == "id,version"
+    drive.get.side_effect = None
+    drive.get.return_value = document(revisions)
+    assert drive.changes("p2")[0] == revisions
+    drive.get.assert_called_once_with(saved["entityId"])
+
+
+@pytest.mark.parametrize("version", ["13", None])
+def test_confirmed_write_downloads_when_change_version_is_different_or_unknown(version):
+    drive = backend()
+    first = rev()
+    newer = rev(first["entityId"], [first["id"]])
+    drive.confirmed_writes[first["entityId"]] = ("12", document([first]))
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "changes": [{"fileId": first["entityId"], "file": {"parents": ["a"], "version": version}}],
+        "newStartPageToken": "p2",
+    }
+    drive.get = MagicMock(return_value=document([first, newer]))
+    assert drive.changes("p1")[0] == [first, newer]
+    drive.get.assert_called_once_with(first["entityId"])
+    assert drive.confirmed_writes == {}
+
+
+def test_confirmed_write_does_not_hide_removal_and_restore():
+    drive = backend()
+    first = rev()
+    drive.file_versions[first["entityId"]] = {first["id"]}
+    drive.confirmed_writes[first["entityId"]] = ("12", document([first]))
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "changes": [
+            {"fileId": first["entityId"], "removed": True},
+            {"fileId": first["entityId"], "file": {"parents": ["a"], "version": "12"}},
+        ],
+        "newStartPageToken": "p2",
+    }
+    drive.get = MagicMock(return_value=document([first]))
+    revisions, _, removed = drive.changes("p1")
+    assert revisions == [first] and removed == [first["id"]]
+    drive.get.assert_called_once_with(first["entityId"])
+
+
+@pytest.mark.parametrize("version", [None, 12, "", "unknown"])
+def test_write_without_a_confirmed_version_retains_normal_download(version):
+    drive = backend()
+    first = rev()
+    drive.service.files.return_value.create.return_value.execute.return_value = {
+        "id": first["entityId"], "version": version,
+    }
+    drive.create(first)
+    assert drive.confirmed_writes == {}
+
+
+def test_confirmed_document_is_discarded_after_one_sync_or_a_failed_sync():
+    drive = backend()
+    first = rev()
+    for failure in [None, OSError("Synthetic network failure")]:
+        drive.confirmed_writes[first["entityId"]] = ("12", document([first]))
+        request = drive.service.changes.return_value.list.return_value
+        request.execute.side_effect = failure
+        request.execute.return_value = {"changes": [], "newStartPageToken": "p2"}
+        if failure:
+            with pytest.raises(Problem):
+                drive.changes("p1")
+        else:
+            drive.changes("p1")
+        assert drive.confirmed_writes == {}
+
+
+@pytest.mark.parametrize("kind", ["account", "contact", "record"])
+@pytest.mark.parametrize("updating", [False, True])
+@pytest.mark.parametrize("optimized", [False, True])
+def test_warm_save_request_counts_and_full_history(kind, updating, optimized, caplog):
+    drive = backend()
+    first = rev()
+    first["entityType"] = kind
+    first["data"] = {
+        "account": AccountData(name="Synthetic customer"),
+        "contact": ContactData(accountId=uuid4().hex, name="Synthetic buyer"),
+        "record": RecordData(
+            accountId=uuid4().hex, productNotes="Synthetic requirement", stageDates={"new_lead": today()},
+        ),
+    }[kind].model_dump(mode="json")
+    saved = {**first, "id": uuid4().hex, "parents": [first["id"]]} if updating else first
+    documents = {"settings": {"folders": drive.folders}}
+    if updating:
+        documents[first["entityId"]] = document([first])
+        drive.entity_files[first["entityId"]] = first["entityId"]
+        drive.file_versions[first["entityId"]] = {first["id"]}
+
+    def request(value):
+        result = MagicMock()
+        result.execute.return_value = value
+        return result
+
+    def download(*, fileId):
+        return request(json.dumps(documents[fileId], ensure_ascii=False, indent=2).encode())
+
+    def metadata(*, fileId, fields):
+        value = {"etag": '"resource-etag"'}
+        if optimized:
+            payload = json.dumps(documents[fileId], ensure_ascii=False, indent=2).encode()
+            value["md5Checksum"] = hashlib.md5(payload, usedforsecurity=False).hexdigest()
+        return request(value)
+
+    def save(**kwargs):
+        media = kwargs["media_body"]
+        value = json.loads(media.getbytes(0, media.size()))
+        documents[first["entityId"]] = value
+        result = {"id": first["entityId"]}
+        if optimized:
+            result["version"] = "12"
+        return request(result)
+
+    drive.service.files.return_value.get_media.side_effect = download
+    drive.conditional_service.files.return_value.get.side_effect = metadata
+    drive.conditional_service.files.return_value.update.side_effect = save
+    drive.service.files.return_value.create.side_effect = save
+    drive._folders = lambda refresh=False: drive.get("settings")["folders"]
+    drive.service.changes.return_value.list.return_value.execute.side_effect = [
+        {"changes": [], "newStartPageToken": "p1"},
+        {"changes": [{
+            "fileId": first["entityId"], "file": {"parents": [drive.folders[kind]], "version": "12"},
+        }], "newStartPageToken": "p2"},
+    ]
+    repo = Repository(drive)
+    repo.initialized, repo.cursor = True, "p0"
+    if updating:
+        repo._apply(first)
+    with caplog.at_level("INFO", logger="uvicorn.error.salestrackr"), save_timing(kind, "test"):
+        repo.sync(force=True)
+        result = repo.commit(saved)
+    metrics = json.loads(caplog.records[-1].message.split("save_timing ", 1)[1])
+    assert metrics["driveCalls"] == ((8 if optimized else 10) if updating else (6 if optimized else 7))
+    assert metrics["confirmedReuses"] == int(optimized)
+    assert result == {"revision": saved, "warning": None}
+    assert repo.current(first["entityId"]) == saved
+    expected = [first, saved] if updating else [saved]
+    assert repo.read_history(first["entityId"]) == expected
+    assert documents[first["entityId"]] == document(expected)
+    drive._folders = MagicMock(return_value=drive.folders)
+    drive.service.changes.return_value.list.return_value.execute.side_effect = None
+    drive.service.changes.return_value.list.return_value.execute.return_value = {
+        "changes": [{
+            "fileId": first["entityId"], "file": {"parents": [drive.folders[kind]], "version": "12"},
+        }],
+        "newStartPageToken": "p3",
+    }
+    drive.service.files.return_value.get_media.reset_mock()
+    assert drive.changes("p2")[0] == expected
+    drive.service.files.return_value.get_media.assert_called_once_with(fileId=first["entityId"])
 
 
 @pytest.mark.parametrize(

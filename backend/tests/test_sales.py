@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 from unittest.mock import patch
 from uuid import uuid4
@@ -622,6 +623,80 @@ def test_idempotent_retry_and_stale_write(client):
         row,
     )
     assert stale.status_code == 409
+
+
+@pytest.mark.parametrize("kind", ["account", "contact", "record"])
+def test_client_generated_edit_ids_preserve_retries_stale_checks_and_history(client, kind, caplog):
+    row = new_sale(client)
+    account_id = row["data"]["accountId"]
+    if kind == "account":
+        original = client.get(f"/api/entities/account/{account_id}").json()["revision"]
+        data = {"name": "Synthetic private company", "notes": "Synthetic private notes"}
+    elif kind == "contact":
+        response, _ = write(client, kind, {"accountId": account_id, "name": "Synthetic buyer"})
+        original = response.json()["revision"]
+        data = {"accountId": account_id, "name": "Synthetic private buyer", "phone": "1234567890"}
+    else:
+        original = row
+        data = {"productNotes": "Synthetic private requirement"}
+    suffix = "/product-notes" if kind == "record" else ""
+    route = f"/api/{kind}s/{original['entityId']}{suffix}"
+    ticket = {"entityId": original["entityId"], "writeId": uuid4().hex}
+    repo = client.app.state.repo
+    with caplog.at_level("INFO", logger="uvicorn.error.salestrackr"):
+        with patch.object(repo.backend, "allocate", side_effect=AssertionError("Do not allocate on edit")):
+            response, body = write(
+                client, kind, data, route, original, method="PATCH", ticket=ticket,
+            )
+            assert response.status_code == 200, response.text
+            confirmed = response.json()["revision"]
+            retry = client.patch(route, json=body, headers=HEADERS)
+            assert retry.status_code == 200 and retry.json()["revision"] == confirmed
+            mismatched = {**body, "data": {**data, "notes": "Different request"}}
+            if kind == "record":
+                mismatched["data"] = {"productNotes": "Different request"}
+            elif kind == "contact":
+                mismatched["data"] = {**data, "name": "Different request"}
+            rejected = client.patch(route, json=mismatched, headers=HEADERS)
+            assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "write_id_reused"
+            stale = client.patch(route, json={**body, "writeId": uuid4().hex}, headers=HEADERS)
+            assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_edit"
+    assert repo.current(original["entityId"]) == confirmed
+    assert repo.read_history(original["entityId"]) == [original, confirmed]
+    messages = [r.message for r in caplog.records if r.name == "uvicorn.error.salestrackr"]
+    metrics = [json.loads(message.split("save_timing ", 1)[1]) for message in messages]
+    assert len(metrics) == 4
+    assert [m["outcome"] for m in metrics] == ["ok", "ok", "error", "error"]
+    assert all(m["entityType"] == kind and m["driveCalls"] == 0 for m in metrics)
+    assert metrics[0]["totalMs"] >= metrics[0]["syncBeforeMs"] >= 0
+    assert metrics[0]["lockWaitMs"] >= 0
+    assert metrics[0]["syncAfterMs"] >= 0
+    assert "Synthetic private" not in "".join(messages)
+    assert "1234567890" not in "".join(messages)
+    assert original["entityId"] not in "".join(messages)
+    assert ticket["writeId"] not in "".join(messages)
+
+
+def test_failed_save_timing_excludes_error_details_and_releases_lock(client, caplog):
+    row = new_sale(client)
+    route = f"/api/records/{row['entityId']}/product-notes"
+    body = {
+        "entityId": row["entityId"], "writeId": uuid4().hex, "baseRevision": row["id"],
+        "data": {"productNotes": "Synthetic private product notes"},
+    }
+    repo = client.app.state.repo
+    failure = Problem("Synthetic private error detail.", 503, "drive_network")
+    with caplog.at_level("INFO", logger="uvicorn.error.salestrackr"):
+        with patch.object(repo, "sync", side_effect=failure):
+            assert client.patch(route, json=body, headers=HEADERS).status_code == 503
+    record = next(r for r in caplog.records if r.name == "uvicorn.error.salestrackr")
+    metrics = json.loads(record.message.split("save_timing ", 1)[1])
+    assert metrics["outcome"] == "error" and metrics["errorCode"] == "drive_network"
+    assert metrics["failedPhase"] == "syncBeforeMs"
+    assert "private" not in record.message and row["entityId"] not in record.message
+    retry = client.patch(route, json=body, headers=HEADERS)
+    assert retry.status_code == 200
+    assert len(repo.read_history(row["entityId"])) == 2
 
 
 def test_all_entity_edits_reuse_files_and_history_remains_paginated(client):

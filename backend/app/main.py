@@ -41,6 +41,7 @@ from .domain import (
 )
 from .queries import VIEWS, matches, query_records
 from .storage import DriveBackend, LocalBackend, Repository, digest
+from .timing import save_timing, timed_lock, timed_phase
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -147,8 +148,9 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         }
 
     def mutate(kind, write, action, request, transform, create=False):
-        with repo.lock:
-            repo.sync(force=True)
+        with save_timing(kind, action), timed_lock(repo.lock):
+            with timed_phase("syncBeforeMs"):
+                repo.sync(force=True)
             fingerprint = digest({"kind": kind, "action": action, "write": write.model_dump(mode="json")})
             prior = repo.prior_write(write.writeId, fingerprint, request.state.actor, write.entityId)
             if prior:
@@ -209,8 +211,9 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
 
     @app.post("/api/writes/prepare")
     def prepare(body: Prepare):
-        with repo.lock:
-            repo.sync()
+        with save_timing(body.entityType, "prepare"), timed_lock(repo.lock):
+            with timed_phase("syncBeforeMs"):
+                repo.sync()
             if body.entityId:
                 # Preparation is also permitted for a record awaiting conflict resolution.
                 if body.entityId not in repo.heads:
@@ -404,8 +407,9 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     @app.post("/api/entities/{kind}/{entity_id}/resolve")
     def resolve(kind: str, entity_id: str, body: Resolution, request: Request):
         require_kind(kind)
-        with repo.lock:
-            repo.sync(force=True)
+        with save_timing(kind, "resolve_conflict"), timed_lock(repo.lock):
+            with timed_phase("syncBeforeMs"):
+                repo.sync(force=True)
             fingerprint = digest(
                 {"kind": kind, "entityId": entity_id, "resolution": body.model_dump(mode="json")}
             )

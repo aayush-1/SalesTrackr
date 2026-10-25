@@ -19,6 +19,7 @@ from httplib2 import Http, HttpLib2Error
 from pydantic import ValidationError
 
 from .domain import MODELS, Problem, Revision, now
+from .timing import confirmed_reuse, drive_execute, timed_phase
 
 logger = logging.getLogger(__name__)
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -248,6 +249,7 @@ class DriveBackend:
         self.settings = None
         self.entity_files = {}
         self.file_versions = {}
+        self.confirmed_writes = {}
 
     def _api(self):
         if self.service is None:
@@ -272,7 +274,7 @@ class DriveBackend:
 
     def _execute(self, request):
         try:
-            return request.execute(num_retries=3)
+            return drive_execute(request, num_retries=3)
         except (OSError, HttpLib2Error, TransportError):
             raise Problem(
                 "Cannot reach Google Drive. Retry after checking connectivity.", 503, "drive_network"
@@ -378,8 +380,12 @@ class DriveBackend:
         return self._execute(self._api().files().generateIds(count=1, space="drive"))["ids"][0]
 
     def get(self, file_id):
+        content = self._download(file_id)
+        return json.loads(content) if content is not None else None
+
+    def _download(self, file_id):
         try:
-            content = self._api().files().get_media(fileId=file_id).execute(num_retries=3)
+            return drive_execute(self._api().files().get_media(fileId=file_id), num_retries=3)
         except (OSError, HttpLib2Error, TransportError):
             raise Problem(
                 "Cannot read Google Drive. Check connectivity and retry.", 503, "drive_network"
@@ -392,20 +398,27 @@ class DriveBackend:
             ) from None
         except RefreshError:
             raise Problem("Drive needs reconnection.", 503, "drive_reconnect") from None
-        return json.loads(content)
 
     def etag(self, file_id):
         return self._execute(self._conditional_api().files().get(fileId=file_id, fields="etag"))["etag"]
 
     def versioned_get(self, file_id):
-        before = self.etag(file_id)
-        content = self.get(file_id)
-        after = self.etag(file_id)
-        if before != after:
-            raise Problem("This record changed. Refresh before editing.", 409, "stale_edit")
-        if content is None:
-            raise Problem("A saved record is missing.", 503, "data_removed")
-        return content, after
+        with timed_phase("readCurrentMs"):
+            metadata = self._execute(
+                self._conditional_api().files().get(fileId=file_id, fields="etag,md5Checksum")
+            )
+            content = self._download(file_id)
+            if content is None:
+                raise Problem("A saved record is missing.", 503, "data_removed")
+            checksum = metadata.get("md5Checksum")
+            if checksum:
+                # Bind the downloaded bytes to the resource ETag, not the unrelated media ETag.
+                matches = hashlib.md5(content, usedforsecurity=False).hexdigest() == checksum
+            else:
+                matches = metadata["etag"] == self.etag(file_id)
+            if not matches:
+                raise Problem("This record changed. Refresh before editing.", 409, "stale_edit")
+            return json.loads(content), metadata["etag"]
 
     def replace(self, file_id, data, etag, *, name=None, properties=None):
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode()
@@ -420,11 +433,12 @@ class DriveBackend:
             fileId=file_id,
             body=body,
             media_body=MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json"),
-            fields="id",
+            fields="id,version",
         )
         request.headers["If-Match"] = etag
         try:
-            return request.execute(num_retries=0)
+            with timed_phase("writeMs"):
+                return drive_execute(request, num_retries=0)
         except HttpError as error:
             if error.resp.status == 412:
                 raise Problem("This record changed. Refresh before editing.", 409, "stale_edit") from None
@@ -458,7 +472,11 @@ class DriveBackend:
             io.BytesIO(payload), mimetype="application/json", resumable=len(payload) > 5_000_000
         )
         try:
-            return self._api().files().create(body=body, media_body=media, fields="id").execute(num_retries=3)
+            with timed_phase("writeMs"):
+                return drive_execute(
+                    self._api().files().create(body=body, media_body=media, fields="id,version"),
+                    num_retries=3,
+                )
         except (OSError, HttpLib2Error, TransportError):
             raise Problem(
                 "Drive save is unconfirmed. Retry without changing this save.", 503, "save_unknown"
@@ -480,6 +498,7 @@ class DriveBackend:
             ) from None
 
     def create(self, revision):
+        self.confirmed_writes.clear()
         folders = self._folders(refresh=True)
         entity_id = revision["entityId"]
         file_id = self.entity_files.get(entity_id)
@@ -494,9 +513,9 @@ class DriveBackend:
             return saved
         try:
             if etag is not None:
-                self.replace(file_id, value, etag)
+                confirmed = self.replace(file_id, value, etag)
             else:
-                self._upload(
+                confirmed = self._upload(
                     value,
                     folders[revision["entityType"]],
                     f"{entity_id}.json",
@@ -514,6 +533,13 @@ class DriveBackend:
                     self.file_versions[file_id] = {r["id"] for r in document_revisions(latest)}
                     return prior
             raise Problem("This record changed. Refresh before editing.", 409, "stale_edit") from None
+        if (
+            isinstance(confirmed, dict)
+            and confirmed.get("id") == file_id
+            and isinstance(confirmed.get("version"), str)
+            and confirmed["version"].isdecimal()
+        ):
+            self.confirmed_writes[file_id] = (confirmed["version"], value)
         self.entity_files[entity_id] = file_id
         self.file_versions[file_id] = {r["id"] for r in [*revisions, saved]}
         return saved
@@ -545,6 +571,7 @@ class DriveBackend:
         return revisions
 
     def initial(self):
+        self.confirmed_writes.clear()
         folders = self._folders(refresh=True)
         self.entity_files, self.file_versions = {}, {}
         if not self.ignore_checkpoints:
@@ -589,6 +616,7 @@ class DriveBackend:
         return None, revisions, token
 
     def changes(self, cursor):
+        confirmed, self.confirmed_writes = self.confirmed_writes, {}
         folders = self._folders(refresh=True)
         allowed = {folders[key]: key for key in FOLDERS}
         revisions, removed = [], []
@@ -609,6 +637,7 @@ class DriveBackend:
             )
             for change in result.get("changes", []):
                 metadata = change.get("file", {})
+                written = confirmed.pop(change["fileId"], None)
                 if (
                     change.get("removed")
                     or metadata.get("trashed")
@@ -620,7 +649,11 @@ class DriveBackend:
                 version = metadata.get("version")
                 if version is not None and downloaded.get(change["fileId"]) == version:
                     continue
-                content = self.get(change["fileId"])
+                if written is not None and version == written[0]:
+                    content = written[1]
+                    confirmed_reuse()
+                else:
+                    content = self.get(change["fileId"])
                 if content is None:
                     raise Problem("A Drive record is unavailable.", 503, "index_incomplete")
                 kind = next(allowed[parent] for parent in metadata["parents"] if parent in allowed)
@@ -834,7 +867,8 @@ class Repository:
         self._apply(revision)
         warning = None
         try:
-            self.sync(force=True)
+            with timed_phase("syncAfterMs"):
+                self.sync(force=True)
         except Problem as error:
             warning = f"Saved, but synchronization is pending: {error.message}"
         return {"revision": revision, "warning": warning}
