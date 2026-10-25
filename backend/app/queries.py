@@ -12,6 +12,7 @@ VIEWS = {
     "closed": "Closed",
     "pending": "Payment pending",
     "paid": "Payment received",
+    "feedback-pending": "Feedback pending",
     "discarded": "Discarded",
 }
 
@@ -32,6 +33,7 @@ def matches(data, view):
         "closed": stage == "closed",
         "pending": "order_received" in data["stageDates"] and not data["paymentReceived"],
         "paid": data["paymentReceived"],
+        "feedback-pending": stage == "closed" and not data.get("feedbackReceived", False),
         "followups": stage == "follow_up",
     }[view]
 

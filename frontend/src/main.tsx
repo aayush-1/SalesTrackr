@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import {
   ArchiveX, ArrowUpRight, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
-  Leaf, Menu, MessageSquare, PackageCheck, PanelLeftClose, Plus, RefreshCw, Truck,
+  Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Truck,
 } from 'lucide-react';
 import { RefreshContext, useResource } from './api';
 import { Alert } from './components';
@@ -30,7 +30,8 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
   const pipeline = [
     ['leads', Leaf], ['followups', MessageSquare], ['orders', PackageCheck],
     ['dispatched', Truck], ['delivered', CheckCheck],
-    ['pending', CircleDollarSign], ['paid', CircleDollarSign], ['closed', CheckCheck], ['discarded', ArchiveX],
+    ['pending', CircleDollarSign], ['paid', CircleDollarSign], ['closed', CheckCheck],
+    ['feedback-pending', MessageSquareText], ['discarded', ArchiveX],
   ] as const;
   return <div className="app">
     <aside className={`sidebar ${open ? 'open' : ''}`}>

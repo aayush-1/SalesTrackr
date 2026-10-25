@@ -44,6 +44,7 @@ test('create account and record, progress, pay, close, filter and retain history
   const acquired = await page.locator('.stages li').first().innerText();
   await expect(page.locator('.stages li strong')).toHaveText(['New lead', 'Follow-up', 'Order in hand', 'Dispatched', 'Delivered', 'Closed']);
   await expect(page.getByRole('button', { name: 'Received', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeDisabled();
   await page.getByLabel('Payment details', { exact: true }).fill('Draft bank reference');
   for (const next of ['Follow-up', 'Order in hand']) {
     await page.getByRole('button', { name: next, exact: true }).click();
@@ -55,6 +56,7 @@ test('create account and record, progress, pay, close, filter and retain history
     await page.getByRole('button', { name: 'Mark stage reached' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.locator('.stages .current strong')).toHaveText(next);
+    await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeDisabled();
     await expect(page.getByLabel('Payment details', { exact: true })).toHaveValue('Draft bank reference');
   }
   const recordUrl = page.url();
@@ -78,6 +80,7 @@ test('create account and record, progress, pay, close, filter and retain history
     await expect(page.locator('.stages .current strong')).toHaveText(next);
   }
   await expect(page.getByRole('button', { name: 'Closed', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Received', exact: true }).click();
   await expect(page.locator('.stages .current strong')).toHaveText('Closed');
   await expect(page.locator('.payment-panel .badge')).toHaveText('Received');
@@ -85,7 +88,45 @@ test('create account and record, progress, pay, close, filter and retain history
   expect(await page.locator('.stages li').first().innerText()).toBe(acquired.replace('\nCURRENT', ''));
   await expect(page.locator('.stages .reached')).toHaveCount(6);
   await expect(page.getByRole('button', { name: 'Discard record', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeEnabled();
+  await expect(page.locator('.feedback-panel .badge')).toHaveText('Pending');
+  const paymentBox = await page.locator('.payment-panel').boundingBox();
+  const feedbackBox = await page.locator('.feedback-panel').boundingBox();
+  expect(feedbackBox!.y).toBeGreaterThanOrEqual(paymentBox!.y + paymentBox!.height);
   await page.screenshot({ path: 'test-results/record.png', fullPage: true });
+  await page.goto('/view/feedback-pending');
+  await page.getByLabel('Search', { exact: true }).fill(account);
+  await expect(page.locator('tbody tr')).toHaveCount(1);
+  await expect(page.locator('tbody .badge')).toHaveText('Closed');
+  await expect(page.getByLabel('Current sales stage', { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: 'test-results/feedback-pending.png', fullPage: true });
+  await page.getByRole('link', { name: account, exact: true }).click();
+  await page.getByLabel('Payment details', { exact: true }).fill('Payment draft survives feedback confirmation.');
+  await page.getByRole('button', { name: 'Feedback received', exact: true }).click();
+  await expect(page.locator('.feedback-panel .badge')).toHaveText('Received');
+  await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeDisabled();
+  await expect(page.locator('.feedback-panel')).toContainText('Received on');
+  await expect(page.getByLabel('Payment details', { exact: true })).toHaveValue('Payment draft survives feedback confirmation.');
+  await page.getByRole('button', { name: 'Save details', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Save details', exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('.feedback-panel .badge')).toHaveText('Received');
+  await expect(page.locator('.stages .current strong')).toHaveText('Closed');
+  await expect(page.locator('.payment-panel .badge')).toHaveText('Received');
+  await page.screenshot({ path: 'test-results/feedback-received.png', fullPage: true });
+  await page.goto('/view/feedback-pending');
+  await page.getByLabel('Search', { exact: true }).fill(account);
+  await expect(page.getByRole('heading', { name: 'Nothing in this view' })).toBeVisible();
+  await page.goto(recordUrl);
+  await page.getByRole('button', { name: 'Undo feedback received', exact: true }).click();
+  await expect(page.locator('.feedback-panel .badge')).toHaveText('Pending');
+  await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeEnabled();
+  await page.goto('/view/feedback-pending');
+  await page.getByLabel('Search', { exact: true }).fill(account);
+  await expect(page.locator('tbody tr')).toHaveCount(1);
+  await page.goto(recordUrl);
+  await page.getByRole('button', { name: 'Feedback received', exact: true }).click();
+  await expect(page.locator('.feedback-panel .badge')).toHaveText('Received');
   await page.getByRole('link', { name: account, exact: true }).click();
   await page.getByRole('link', { name: 'New sales record', exact: true }).click();
   await page.getByLabel('Product / requirement notes').fill('A separate enquiry acquired today.');
@@ -204,7 +245,7 @@ test('sales filters use acquisition dates and only relevant current stages', asy
   await expect(page.getByRole('heading', { name: 'Follow-ups', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation').getByRole('link')).toHaveText([
     'Overview', 'All sales records', 'Accounts', 'New leads', 'Follow-ups', 'Order in hand',
-    'Dispatched', 'Delivered', 'Payment pending', 'Payment received', 'Closed', 'Discarded',
+    'Dispatched', 'Delivered', 'Payment pending', 'Payment received', 'Closed', 'Feedback pending', 'Discarded',
   ]);
   await page.getByLabel('Lead acquired date', { exact: true }).selectOption('today');
   await expect(page.getByLabel('Filter by date')).toHaveCount(0);

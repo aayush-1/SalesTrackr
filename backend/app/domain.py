@@ -121,6 +121,8 @@ class RecordData(RecordFields):
     paymentReceivedOn: date | None = None
     paymentDueOn: date | None = None
     paymentNote: Text = ""
+    feedbackReceived: bool = False
+    feedbackReceivedOn: date | None = None
     nextFollowUpOn: date | None = None
     followUps: list[FollowUpEntry] = Field(default_factory=list, max_length=2000)
 
@@ -170,6 +172,13 @@ class RecordData(RecordFields):
                 raise ValueError("Closing requires delivery and payment receipt.")
             if self.paymentReceivedOn > self.stageDates["closed"]:
                 raise ValueError("Closed date cannot precede payment receipt.")
+        if self.feedbackReceived:
+            if "closed" not in self.stageDates or self.feedbackReceivedOn is None:
+                raise ValueError("Feedback receipt requires a closed record and a received date.")
+            if not self.stageDates["closed"] <= self.feedbackReceivedOn <= today():
+                raise ValueError("Feedback date must be between closure and today.")
+        elif self.feedbackReceivedOn is not None:
+            raise ValueError("A feedback date requires feedback receipt.")
         return self
 
 
@@ -185,6 +194,10 @@ class PaymentChange(Model):
     occurredOn: date | None = None
     note: Text | None = None
     reason: Text = ""
+
+
+class FeedbackChange(Model):
+    received: bool
 
 
 T = TypeVar("T")
@@ -242,6 +255,8 @@ def stage_change(record: RecordData, change: StageChange) -> RecordData:
         raise Problem("Mark the next stage only; earlier stages need their actual dates.")
     if target <= current and not change.reason.strip():
         raise Problem("A correction or backtrack requires a reason.")
+    if change.stage != "closed" and record.feedbackReceived:
+        raise Problem("Undo feedback received before reopening the record.")
     before_order = target < STAGES.index("order_received")
     if before_order and record.paymentReceived:
         raise Problem("Correct the payment before removing order confirmation.")
@@ -283,6 +298,18 @@ def payment_change(record: RecordData, change: PaymentChange) -> RecordData:
     if change.received is True and record_stage(result) == "delivered":
         result["stageDates"]["closed"] = today()
     return RecordData.model_validate(result)
+
+
+def feedback_change(record: RecordData, change: FeedbackChange) -> RecordData:
+    if "closed" not in record.stageDates:
+        raise Problem("Close the sales record before recording feedback.")
+    return RecordData.model_validate(
+        {
+            **record.model_dump(),
+            "feedbackReceived": change.received,
+            "feedbackReceivedOn": (record.feedbackReceivedOn or today()) if change.received else None,
+        }
+    )
 
 
 def add_followup(record: RecordData, entry: FollowUp) -> RecordData:

@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState } from 'react';
-import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, Pencil, Plus } from 'lucide-react';
+import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, MessageSquareText, Pencil, Plus } from 'lucide-react';
 import { Link, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { allAccounts, RefreshContext, useResource, useSave } from '../api';
 import { Alert, Back, Field, Loading, Modal, PageHeader, PaymentBadge, SaveButton, StageBadge, Timeline, TrackedForm, formValues, markFormSaved } from '../components';
@@ -109,7 +109,7 @@ function ActionForm({ row, action, done }: { row: Revision<SalesRecord>; action:
         </Field>
         <Field label="Actual stage date" hint="If blank, today is recorded."><input name="occurredOn" type="date" max={me?.today} /></Field>
         {target === 'follow_up' && <Field label="Quotation number (optional)"><input name="quotationReference" maxLength={100} defaultValue={data.quotationReference} placeholder="e.g. Q-2026-001" /></Field>}
-        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history. This corrects a recording error; it is not a return or cancellation.</Alert></div></>}
+        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history. This corrects a recording error; it is not a return or cancellation.{data.feedbackReceived && ' Undo feedback received before reopening this record.'}</Alert></div></>}
       </>}
       {action === 'followup' && <>
         <Field label="Follow-up note *" wide><textarea name="note" required rows={4} maxLength={10000} placeholder="What was discussed? What happens next?" /></Field>
@@ -118,7 +118,7 @@ function ActionForm({ row, action, done }: { row: Revision<SalesRecord>; action:
       </>}
       {action === 'product' && <Field label="Product / requirement notes" wide><textarea name="productNotes" rows={7} maxLength={10000} defaultValue={data.productNotes} /></Field>}
       {action === 'discard' && <>
-        <div className="wide"><Alert tone="warning">This record will become read-only and leave the stage/payment queues. It stays in All sales records and Discarded, with its original dates, payment state, and history. Nothing is deleted.</Alert></div>
+        <div className="wide"><Alert tone="warning">This record will become read-only and leave the stage, payment, and feedback queues. It stays in All sales records and Discarded, with its original dates, payment and feedback state, and history. Nothing is deleted.</Alert></div>
         <Field label="Discard remark *" wide><textarea name="reason" required rows={4} maxLength={10000} placeholder="Why is this sales record being discarded?" /></Field>
       </>}
       {action === 'edit' && <>
@@ -168,6 +168,34 @@ function PaymentPanel({ row, note, onNoteChange, done }: {
   </section>;
 }
 
+function FeedbackPanel({ row, done }: { row: Revision<SalesRecord>; done: (warning: string | null) => void }) {
+  const record = row.data;
+  const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
+  const closed = currentStage(record) === 'closed';
+  const persist = async (received: boolean) => {
+    const result = await save(`/records/${row.entityId}/feedback`, { received });
+    if (result) done(result.warning);
+  };
+  return <section className="panel feedback-panel" aria-label="Feedback">
+    <div className="section-heading compact"><h2><MessageSquareText size={20} /> Feedback</h2>
+      <span className={`badge ${record.feedbackReceived ? 'paid' : 'unpaid'}`}>{record.feedbackReceived ? 'Received' : 'Pending'}</span>
+    </div>
+    <p className="help-text">{record.feedbackReceived
+      ? `Received on ${formatDate(record.feedbackReceivedOn)}.`
+      : closed ? 'This sale is closed and awaiting feedback.' : 'Feedback can be marked received after the sales record is closed.'}</p>
+    {error && <Alert>{error}</Alert>}
+    {!record.discarded && <>
+      <div className="form-footer"><button type="button" className="button primary"
+        disabled={busy || !closed || !!record.feedbackReceived} onClick={() => void persist(true)}>
+        <Check size={16} />{busy ? 'Saving...' : 'Feedback received'}
+      </button></div>
+      {record.feedbackReceived && <button type="button" className="text-button" disabled={busy} onClick={() => void persist(false)}>Undo feedback received</button>}
+      {closed && !record.feedbackReceived && <p className="help-text"><Link to="/view/feedback-pending">View all feedback pending</Link></p>}
+    </>}
+    {record.discarded && <p className="help-text">Feedback state retained at discard. This record is read-only.</p>}
+  </section>;
+}
+
 function RecordHistory({ id }: { id: string }) {
   const [offset, setOffset] = useState(0);
   const { data, error, loading } = useResource<Page<SalesRecord>>(`/entities/record/${id}/history?offset=${offset}&limit=10`);
@@ -178,7 +206,8 @@ function RecordHistory({ id }: { id: string }) {
         <dl>{stages.filter(s => row.data.stageDates[s]).map(s => <div key={s}><dt>{labels[s]}</dt><dd>{formatDate(row.data.stageDates[s])}</dd></div>)}
           {row.data.stageDates.quotation_pending && <div><dt>Quotation pending (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_pending)}</dd></div>}
           {row.data.stageDates.quotation_sent && <div><dt>Quotation sent (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_sent)}</dd></div>}
-          <div><dt>Quotation number</dt><dd>{row.data.quotationReference || 'Not added'}</dd></div></dl>
+          <div><dt>Quotation number</dt><dd>{row.data.quotationReference || 'Not added'}</dd></div>
+          <div><dt>Feedback</dt><dd>{row.data.feedbackReceived ? `Received on ${formatDate(row.data.feedbackReceivedOn)}` : 'Not received'}</dd></div></dl>
         <p className="pre-wrap">{row.data.productNotes}</p><p className="pre-wrap">{row.data.notes}</p>
         {row.data.paymentNote && <p className="pre-wrap">{row.data.paymentNote}</p>}
         {row.data.discarded && <><p>Discarded on {formatDate(row.data.discardedOn)}</p><p className="pre-wrap">{row.data.discardNote}</p></>}
@@ -219,7 +248,7 @@ export function RecordDetail() {
         {notice && <Alert tone="warning">{notice}</Alert>}
         {record.discarded && <section className="panel details-panel discard-panel" aria-label="Discard details">
           <h2><ArchiveX size={19} />Discarded on {formatDate(record.discardedOn)}</h2>
-          <p className="pre-wrap">{record.discardNote}</p><p className="help-text">This record is read-only. Its last sales stage, payment state, and history are preserved.</p>
+          <p className="pre-wrap">{record.discardNote}</p><p className="help-text">This record is read-only. Its last sales stage, payment and feedback state, and history are preserved.</p>
         </section>}
         <section className="panel timeline-panel"><div className="section-heading"><div><h2>Your sales journey</h2><p>Green stages are reached. Every step keeps its date.</p></div><StageBadge record={record} /></div>
           <Timeline record={record} />{!record.discarded && <div className="timeline-actions"><button className="text-button muted" onClick={() => setAction('correction')}><History size={15} />Correct a stage or date</button>
@@ -244,7 +273,9 @@ export function RecordDetail() {
           </section></div>
           <aside><PaymentPanel key={row.id} row={row} note={paymentDraft?.entityId === row.entityId ? paymentDraft.note : record.paymentNote}
             onNoteChange={note => setPaymentDraft({ entityId: row.entityId, note })}
-            done={warning => { setPaymentDraft(null); setNotice(warning); }} /><div className="audit-note"><History size={17} /><span>Last updated {formatDate(row.createdAt)}<br />Creation and later changes are retained in history.</span></div></aside>
+            done={warning => { setPaymentDraft(null); setNotice(warning); }} />
+            <FeedbackPanel key={`feedback-${row.id}`} row={row} done={setNotice} />
+            <div className="audit-note"><History size={17} /><span>Last updated {formatDate(row.createdAt)}<br />Creation and later changes are retained in history.</span></div></aside>
         </div>
         <RecordHistory id={id!} />
         {action && !record.discarded && <Modal title={titles[action]} onClose={() => setAction(null)}><ActionForm key={`${action}-${row.id}`} row={row} action={action} done={warning => { if (action === 'discard') setPaymentDraft(null); setAction(null); setNotice(warning); }} /></Modal>}
