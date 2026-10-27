@@ -12,6 +12,8 @@ A private sales workspace: one customer account, one record per enquiry, and a d
 - Green reached stages, optional actual dates, automatic recording timestamps, and correction history.
 - A payment-details box with a **Received** button; no order amounts, balances, partial-payment inputs, or payment columns in sales tables.
 - A feedback box below Payment with a **Feedback received** button, disabled until the record is closed. Confirmation saves the received date and remains in history; **Undo feedback received** corrects a mistaken click.
+- A separate **Stock update** box between Payment and Feedback. **Stock updated** becomes available at Order in hand, records the confirmation date and keeps history. Stock confirmation is required before dispatch, not as a separate closure condition. It does not update inventory quantities or advance stages automatically.
+- **Stock update pending**, directly below Feedback pending, lists non-discarded confirmed orders whose stock update is not confirmed, including existing dispatched, delivered and closed records.
 - **Feedback pending** lists closed, non-discarded records whose feedback is not yet received, including existing closed records. Confirming feedback removes a record from this view without changing its Closed stage or payment state.
 - Stage tabs show only the current status: **New leads**, **Follow-ups**, **Order in hand**, **Dispatched**, **Delivered**, and **Closed**. Payment pending and Payment received remain separate views.
 - **Lead acquired date** filters by day/month/range in every view, showing those leads' current progress today. **Current sales stage** lists only relevant stages and is hidden on single-stage tabs.
@@ -24,9 +26,21 @@ A private sales workspace: one customer account, one record per enquiry, and a d
   or closed records with feedback received, including their saved history. Accounts, contacts and
   existing backups are preserved; deletion requires selecting records and typing `DELETE`.
 
-**Received** confirms payment and automatically closes an already-delivered sale. Before delivery it records receipt without skipping dispatch/delivery; after delivery, close the sale with Received or the final stage action. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
+**Received** confirms payment and automatically closes an already-delivered sale. Payment can be received before dispatch, independently of stock confirmation. Closing still requires delivery and payment receipt; stock is checked when dispatching instead. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
 
 Feedback is tracked separately after closure. Undo feedback receipt before reopening a record to correct its stage; the previous feedback confirmation remains in history. Discarded records retain their feedback state and are read-only.
+
+Stock update is tracked separately once an order is confirmed. Dispatch is blocked
+until stock is updated; the dispatch date cannot precede the stock confirmation.
+Existing later-stage records without the new fields remain valid and show Pending;
+their history and stage dates are not rewritten or bulk-migrated. The flag and date
+are stored on the next save. Correct a dispatched record back to Order in hand
+before undoing stock confirmation. Undo stock confirmation before removing order
+confirmation. Discarded records retain
+their stock state and remain read-only. Firestore updates its derived queue indexes
+per dataset/version, without rewriting revision payloads, stage dates or history.
+The index marker also tracks the workspace sequence so an in-flight save from the
+previous application revision is repaired safely during deployment.
 
 Existing Quotation pending records appear as New lead, and Quotation sent records appear as Follow-up. An existing Follow-up date takes precedence; otherwise its date comes from the retired Quotation sent milestone. Later stages and quotation references stay intact, and original milestone dates remain in immutable history. No Quotation sent or Awaiting delivery tab is needed.
 

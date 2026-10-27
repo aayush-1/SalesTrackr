@@ -22,6 +22,7 @@ from .timing import timed_phase
 
 CHUNK_SIZE = 512 * 1024
 MAX_PAYLOAD = 256 * 1024 * 1024
+VIEW_VERSION = 2
 
 
 def filtered(query, field, operator, value):
@@ -30,6 +31,12 @@ def filtered(query, field, operator, value):
 
 def bucket(view="all", account_id=None, stage=None):
     return f"record|{view}|{account_id or '*'}|{stage or '*'}"
+
+
+def view_index(control):
+    return {
+        "dataset": control["activeDataset"], "version": VIEW_VERSION, "sequence": control["sequence"],
+    }
 
 
 def projection(revisions, heads=None):
@@ -41,6 +48,7 @@ def projection(revisions, heads=None):
         "kind": first["entityType"],
         "heads": sorted(heads),
         "conflicted": len(heads) != 1,
+        "viewVersion": VIEW_VERSION,
     }
     if row["kind"] == "account":
         names = {r["id"]: r["data"]["name"] for r in current}
@@ -72,7 +80,7 @@ def projection(revisions, heads=None):
                 ],
                 queryData={key: data[key] for key in (
                     "accountId", "productNotes", "stageDates", "workflowVersion", "discarded",
-                    "paymentReceived", "feedbackReceived", "nextFollowUpOn",
+                    "paymentReceived", "feedbackReceived", "stockUpdated", "nextFollowUpOn",
                 )},
             )
     return row
@@ -121,6 +129,7 @@ class FirestoreRepository:
                 self.workspace.create({
                     "activeDataset": namespace, "generation": namespace, "sequence": 0,
                     "maintenance": None, "weeklyEnabled": True, **counters([]),
+                    "viewIndex": {"dataset": namespace, "version": VIEW_VERSION, "sequence": 0},
                 })
             except AlreadyExists:
                 pass
@@ -174,8 +183,65 @@ class FirestoreRepository:
 
             value = expire(self.client.transaction())
         self.control = value
+        if not value.get("maintenance") and value.get("viewIndex") != view_index(value):
+            self._upgrade_views()
+            value = self.workspace.get().to_dict()
+            self.control = value
         self.synced_at = now()
         self.error = "Storage maintenance is in progress." if value.get("maintenance") else None
+
+    def _upgrade_views(self):
+        # Rebuild derived indexes only; original revision payloads and dates stay immutable.
+        namespace, generation = self.namespace, self.generation
+
+        def guard(control):
+            self.check_generation(generation, control)
+            if control["activeDataset"] != namespace.id:
+                raise Problem("The workspace changed. Refresh and retry.", 409, "workspace_changed")
+
+        @firestore.transactional
+        def rebuild(transaction, ref):
+            control = self.workspace.get(transaction=transaction).to_dict()
+            guard(control)
+            old = ref.get(transaction=transaction).to_dict()
+            if not old or old.get("viewVersion") == VIEW_VERSION:
+                return
+            revisions = [self._revision(key, namespace) for key in old["heads"]]
+            if any(row["entityId"] != ref.id or row["entityType"] != "record" for row in revisions):
+                raise Problem("A current-version index was altered.", 503, "data_altered")
+            row = projection(revisions, heads=set(old["heads"]))
+            dashboard = {
+                view: control["dashboard"].get(view, 0)
+                + int(view in row.get("views", [])) - int(view in old.get("views", []))
+                for view in VIEWS
+            }
+            transaction.set(ref, row)
+            transaction.update(self.workspace, {"dashboard": dashboard})
+
+        @firestore.transactional
+        def finish(transaction, sequence, dashboard):
+            control = self.workspace.get(transaction=transaction).to_dict()
+            guard(control)
+            if control["sequence"] != sequence:
+                return False
+            transaction.update(self.workspace, {
+                "viewIndex": view_index(control), "dashboard": dashboard,
+            })
+            return True
+
+        query = filtered(namespace.collection("entities"), "kind", "==", "record")
+        for _ in range(3):
+            control = self.workspace.get().to_dict()
+            guard(control)
+            for item in query.stream():
+                if item.to_dict().get("viewVersion") != VIEW_VERSION:
+                    rebuild(self.client.transaction(), item.reference)
+            dashboard = counters([item.to_dict() for item in query.stream()])["dashboard"]
+            if finish(self.client.transaction(), control["sequence"], dashboard):
+                return
+        raise Problem(
+            "Records changed while rebuilding indexes. Retry shortly.", 503, "index_upgrade_pending",
+        )
 
     def metadata(self):
         return {
@@ -451,6 +517,11 @@ class FirestoreRepository:
             if prior:
                 self._check_prior(prior, revision["fingerprint"], revision["actor"], revision["entityId"])
                 return prior, control, None
+            if control.get("viewIndex") != view_index(control):
+                raise Problem(
+                    "The record index changed during this save. Retry to finish the index update.",
+                    503, "index_upgrade_pending",
+                )
             old = entity_ref.get(transaction=transaction).to_dict()
             if revision["entityType"] == "record":
                 removed = namespace.collection("recordDeletions").document(revision["entityId"]).get(
@@ -515,9 +586,10 @@ class FirestoreRepository:
             if old is None:
                 updated["entityCounts"][kind] += 1
             for view in VIEWS:
-                updated["dashboard"][view] += (
+                updated["dashboard"][view] = updated["dashboard"].get(view, 0) + (
                     int(view in new_row.get("views", [])) - int(view in (old or {}).get("views", []))
                 )
+            updated["viewIndex"] = view_index(updated)
             transaction.set(self.workspace, updated)
             return None, updated, warning
 

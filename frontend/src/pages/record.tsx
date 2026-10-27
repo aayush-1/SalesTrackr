@@ -1,5 +1,5 @@
-import { useContext, useEffect, useState } from 'react';
-import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, MessageSquareText, Pencil, Plus } from 'lucide-react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, MessageSquareText, PackageCheck, Pencil, Plus } from 'lucide-react';
 import { Link, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { allAccounts, RefreshContext, useResource, useSave } from '../api';
 import { Alert, Back, Field, Loading, Modal, PageHeader, PaymentBadge, SaveButton, StageBadge, Timeline, TrackedForm, formValues, markFormSaved } from '../components';
@@ -107,9 +107,10 @@ function ActionForm({ row, action, done }: { row: Revision<SalesRecord>; action:
             {(action === 'stage' ? [next] : stages.slice(0, stages.indexOf(current) + 1)).filter(Boolean).map(s => <option value={s} key={s}>{labels[s]}</option>)}
           </select>
         </Field>
-        <Field label="Actual stage date" hint="If blank, today is recorded."><input name="occurredOn" type="date" max={me?.today} /></Field>
+        <Field label="Actual stage date" hint="If blank, today is recorded."><input key={target} name="occurredOn" type="date" max={me?.today}
+          defaultValue={action === 'correction' && target === 'order_received' && data.stockUpdated ? data.stageDates.order_received : undefined} /></Field>
         {target === 'follow_up' && <Field label="Quotation number (optional)"><input name="quotationReference" maxLength={100} defaultValue={data.quotationReference} placeholder="e.g. Q-2026-001" /></Field>}
-        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history. This corrects a recording error; it is not a return or cancellation.{data.feedbackReceived && ' Undo feedback received before reopening this record.'}</Alert></div></>}
+        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history. This corrects a recording error; it is not a return or cancellation.{data.feedbackReceived && ' Undo feedback received before reopening this record.'}{data.stockUpdated && ' To undo stock confirmation, first return to Order in hand using its original date. Undo stock before removing order confirmation.'}</Alert></div></>}
       </>}
       {action === 'followup' && <>
         <Field label="Follow-up note *" wide><textarea name="note" required rows={4} maxLength={10000} placeholder="What was discussed? What happens next?" /></Field>
@@ -135,15 +136,23 @@ function ActionForm({ row, action, done }: { row: Revision<SalesRecord>; action:
   </TrackedForm>;
 }
 
-function PaymentPanel({ row, note, onNoteChange, done }: {
-  row: Revision<SalesRecord>; note: string; onNoteChange: (note: string) => void; done: (warning: string | null) => void;
+type RecordPanelProps = {
+  row: Revision<SalesRecord>; done: (warning: string | null) => void;
+  actions: { busy: boolean; begin: () => boolean; end: () => void };
+};
+
+function PaymentPanel({ row, note, onNoteChange, done, actions }: RecordPanelProps & {
+  note: string; onNoteChange: (note: string) => void;
 }) {
   const record = row.data;
   const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
   const closed = currentStage(record) === 'closed';
   const persist = async (received: boolean | undefined, form: HTMLFormElement | null) => {
-    const result = await save(`/records/${row.entityId}/payment`, { received, note });
-    if (result) { if (form) markFormSaved(form); done(result.warning); }
+    if (!actions.begin()) return;
+    try {
+      const result = await save(`/records/${row.entityId}/payment`, { received, note });
+      if (result) { if (form) markFormSaved(form); done(result.warning); }
+    } finally { actions.end(); }
   };
   if (record.discarded) return <section className="panel payment-panel">
     <div className="section-heading compact"><h2><CircleDollarSign size={20} /> Payment</h2><PaymentBadge data={record} /></div>
@@ -157,24 +166,61 @@ function PaymentPanel({ row, note, onNoteChange, done }: {
       <Field label="Payment details"><textarea rows={3} maxLength={10000} value={note} onChange={e => onNoteChange(e.target.value)} placeholder="Payment reference or notes (optional)" /></Field>
       {error && <Alert>{error}</Alert>}
       <div className="form-footer">
-        {note !== record.paymentNote && <SaveButton busy={busy}>Save details</SaveButton>}
-        <button type="button" className="button primary" disabled={busy || !record.stageDates.order_received || (record.paymentReceived && currentStage(record) !== 'delivered')}
+        {note !== record.paymentNote && <SaveButton busy={busy || actions.busy}>Save details</SaveButton>}
+        <button type="button" className="button primary" disabled={busy || actions.busy || !record.stageDates.order_received || (record.paymentReceived && currentStage(record) !== 'delivered')}
           onClick={e => void persist(true, e.currentTarget.form)}><Check size={16} />{busy ? 'Saving...' : 'Received'}</button>
       </div>
       {record.paymentReceived && <p className="help-text">Received on {formatDate(record.paymentReceivedOn)}.</p>}
       {!record.paymentReceived && <p className="help-text">If already delivered, Received also closes the sale.</p>}
-      {record.paymentReceived && !closed && <button type="button" className="text-button" disabled={busy} onClick={e => void persist(false, e.currentTarget.form)}>Undo received</button>}
+      {record.paymentReceived && !closed && <button type="button" className="text-button" disabled={busy || actions.busy} onClick={e => void persist(false, e.currentTarget.form)}>Undo received</button>}
     </TrackedForm>
   </section>;
 }
 
-function FeedbackPanel({ row, done }: { row: Revision<SalesRecord>; done: (warning: string | null) => void }) {
+function StockPanel({ row, done, actions }: RecordPanelProps) {
+  const record = row.data;
+  const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
+  const ordered = !!record.stageDates.order_received;
+  const dispatched = !!record.stageDates.dispatched;
+  const persist = async (updated: boolean) => {
+    if (!actions.begin()) return;
+    try {
+      const result = await save(`/records/${row.entityId}/stock`, { updated });
+      if (result) done(result.warning);
+    } finally { actions.end(); }
+  };
+  return <section className="panel stock-panel" aria-label="Stock update">
+    <div className="section-heading compact"><h2><PackageCheck size={20} /> Stock update</h2>
+      <span className={`badge ${record.stockUpdated ? 'paid' : 'unpaid'}`}>{record.stockUpdated ? 'Updated' : 'Pending'}</span>
+    </div>
+    <p className="help-text">{record.stockUpdated
+      ? `Updated on ${formatDate(record.stockUpdatedOn)}.`
+      : ordered ? 'Confirm once your stock records have been updated for this order.' : 'Available after Order in hand.'}</p>
+    <p className="help-text">Required before dispatch. This confirmation does not change stock quantities or advance the sales stage automatically.</p>
+    {error && <Alert>{error}</Alert>}
+    {!record.discarded && <>
+      <div className="form-footer"><button type="button" className="button primary"
+        disabled={busy || actions.busy || !ordered || !!record.stockUpdated} onClick={() => void persist(true)}>
+        <Check size={16} />{busy ? 'Saving...' : 'Stock updated'}
+      </button></div>
+      {record.stockUpdated && !dispatched && <button type="button" className="text-button" disabled={busy || actions.busy} onClick={() => void persist(false)}>Undo stock updated</button>}
+      {record.stockUpdated && dispatched && <p className="help-text">Correct this record back to Order in hand before undoing stock confirmation.</p>}
+      {ordered && !record.stockUpdated && <p className="help-text"><Link to="/view/stock-pending">View stock update pending</Link></p>}
+    </>}
+    {record.discarded && <p className="help-text">Stock update state retained at discard. This record is read-only.</p>}
+  </section>;
+}
+
+function FeedbackPanel({ row, done, actions }: RecordPanelProps) {
   const record = row.data;
   const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
   const closed = currentStage(record) === 'closed';
   const persist = async (received: boolean) => {
-    const result = await save(`/records/${row.entityId}/feedback`, { received });
-    if (result) done(result.warning);
+    if (!actions.begin()) return;
+    try {
+      const result = await save(`/records/${row.entityId}/feedback`, { received });
+      if (result) done(result.warning);
+    } finally { actions.end(); }
   };
   return <section className="panel feedback-panel" aria-label="Feedback">
     <div className="section-heading compact"><h2><MessageSquareText size={20} /> Feedback</h2>
@@ -186,10 +232,10 @@ function FeedbackPanel({ row, done }: { row: Revision<SalesRecord>; done: (warni
     {error && <Alert>{error}</Alert>}
     {!record.discarded && <>
       <div className="form-footer"><button type="button" className="button primary"
-        disabled={busy || !closed || !!record.feedbackReceived} onClick={() => void persist(true)}>
+        disabled={busy || actions.busy || !closed || !!record.feedbackReceived} onClick={() => void persist(true)}>
         <Check size={16} />{busy ? 'Saving...' : 'Feedback received'}
       </button></div>
-      {record.feedbackReceived && <button type="button" className="text-button" disabled={busy} onClick={() => void persist(false)}>Undo feedback received</button>}
+      {record.feedbackReceived && <button type="button" className="text-button" disabled={busy || actions.busy} onClick={() => void persist(false)}>Undo feedback received</button>}
       {closed && !record.feedbackReceived && <p className="help-text"><Link to="/view/feedback-pending">View all feedback pending</Link></p>}
     </>}
     {record.discarded && <p className="help-text">Feedback state retained at discard. This record is read-only.</p>}
@@ -207,6 +253,7 @@ function RecordHistory({ id }: { id: string }) {
           {row.data.stageDates.quotation_pending && <div><dt>Quotation pending (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_pending)}</dd></div>}
           {row.data.stageDates.quotation_sent && <div><dt>Quotation sent (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_sent)}</dd></div>}
           <div><dt>Quotation number</dt><dd>{row.data.quotationReference || 'Not added'}</dd></div>
+          <div><dt>Stock update</dt><dd>{row.data.stockUpdated ? `Updated on ${formatDate(row.data.stockUpdatedOn)}` : 'Not confirmed'}</dd></div>
           <div><dt>Feedback</dt><dd>{row.data.feedbackReceived ? `Received on ${formatDate(row.data.feedbackReceivedOn)}` : 'Not received'}</dd></div></dl>
         <p className="pre-wrap">{row.data.productNotes}</p><p className="pre-wrap">{row.data.notes}</p>
         {row.data.paymentNote && <p className="pre-wrap">{row.data.paymentNote}</p>}
@@ -224,6 +271,21 @@ export function RecordDetail() {
   const [action, setAction] = useState<Action | null>(null);
   const [notice, setNotice] = useState<string | null>(location.state?.notice || null);
   const [paymentDraft, setPaymentDraft] = useState<{ entityId: string; note: string } | null>(null);
+  const actionLock = useRef(false);
+  const [recordSaving, setRecordSaving] = useState(false);
+  const { lastSave } = useContext(RefreshContext);
+  const refreshPending = !!data && lastSave?.revision.entityType === 'record' &&
+    lastSave.revision.entityId === id && lastSave.revision.id !== data.revision.id &&
+    lastSave.revision.parents.includes(data.revision.id);
+  const recordBusy = recordSaving || refreshPending;
+  const recordActions = {
+    busy: recordBusy,
+    begin: () => {
+      if (actionLock.current || refreshPending) return false;
+      actionLock.current = true; setRecordSaving(true); return true;
+    },
+    end: () => { actionLock.current = false; setRecordSaving(false); },
+  };
   const titles = { stage: 'Move to the next stage', correction: 'Correct stage / date', followup: 'Log a follow-up', edit: 'Edit sales record', product: 'Edit product / requirement notes', discard: 'Discard sales record' };
   return <><Back to="/records">All sales records</Back>
     {error && <Alert>{error} <Link to="/conflicts">Review conflicts</Link></Alert>}{loading && <Loading />}
@@ -237,8 +299,8 @@ export function RecordDetail() {
         <PageHeader eyebrow={`SALES RECORD · ${row.entityId.slice(0, 8).toUpperCase()}`} title={account?.data.name || 'Company unavailable'}
           description={account ? account.data.address || 'Location not added' : undefined}
           action={!record.discarded && <div className="actions">
-            <button className="button" onClick={() => setAction('edit')}><Pencil size={15} />Edit details</button>
-            <button className="button danger" onClick={() => {
+            <button className="button" disabled={recordBusy} onClick={() => setAction('edit')}><Pencil size={15} />Edit details</button>
+            <button className="button danger" disabled={recordBusy} onClick={() => {
               if (paymentDraft?.entityId === row.entityId && paymentDraft.note !== record.paymentNote &&
                   !window.confirm('Payment details have unsaved changes. Continue discarding without saving them?')) return;
               setAction('discard');
@@ -250,9 +312,14 @@ export function RecordDetail() {
           <p className="pre-wrap">{record.discardNote}</p><p className="help-text">This record is read-only. Its last sales stage, payment and feedback state, and history are preserved.</p>
         </section>}
         <section className="panel timeline-panel"><div className="section-heading"><div><h2>Your sales journey</h2><p>Green stages are reached. Every step keeps its date.</p></div><StageBadge record={record} /></div>
-          <Timeline record={record} />{!record.discarded && <div className="timeline-actions"><button className="text-button muted" onClick={() => setAction('correction')}><History size={15} />Correct a stage or date</button>
-            {next ? <button className="button primary" onClick={() => setAction('stage')} disabled={next === 'closed' && !record.paymentReceived}>{labels[next]}<ArrowRight size={17} /></button> : <span className="completed-label"><Check size={17} />Delivered, paid, and closed</span>}</div>}
-          {!record.discarded && next === 'closed' && !record.paymentReceived && <p className="closing-note">Use Received in the payment box to close this delivered sale.</p>}
+          <Timeline record={record} />{!record.discarded && <div className="timeline-actions"><button className="text-button muted" disabled={recordBusy} onClick={() => setAction('correction')}><History size={15} />Correct a stage or date</button>
+            {next ? <button className="button primary" onClick={() => setAction('stage')} disabled={recordBusy || (next === 'dispatched' && !record.stockUpdated) || (next === 'closed' && !record.paymentReceived)}>{labels[next]}<ArrowRight size={17} /></button> : <span className="completed-label"><Check size={17} />Delivered, paid, and closed</span>}</div>}
+          {!record.discarded && next === 'dispatched' && !record.stockUpdated && <p className="closing-note">
+            Use Stock updated in the stock box before dispatching this order.
+          </p>}
+          {!record.discarded && next === 'closed' && !record.paymentReceived && <p className="closing-note">
+            Use Received in the payment box to close this delivered sale.
+          </p>}
         </section>
         <div className="record-columns">
           <div><section className="panel details-panel"><h2>Enquiry details</h2><dl className="details-grid">
@@ -261,19 +328,20 @@ export function RecordDetail() {
             <div><dt>Contact person</dt><dd>{contact?.data.name || 'Not selected'}</dd></div><div><dt>Quotation number</dt><dd>{record.quotationReference || 'Not added'}</dd></div>
           </dl>{errors.account && <Alert>{errors.account}</Alert>}{errors.contact && <Alert>{errors.contact}</Alert>}
             <div className="note-block"><div className="note-heading"><h3>Product / requirement notes</h3>
-              {!record.discarded && <button className="text-button" aria-label="Edit product / requirement notes" onClick={() => setAction('product')}><Pencil size={14} />Edit</button>}
+              {!record.discarded && <button className="text-button" disabled={recordBusy} aria-label="Edit product / requirement notes" onClick={() => setAction('product')}><Pencil size={14} />Edit</button>}
             </div><p className="pre-wrap">{record.productNotes || 'No product notes yet.'}</p></div>
             <div className="note-block"><h3>General notes</h3><p className="pre-wrap">{record.notes || 'No general notes yet.'}</p></div>
           </section>
-          <section className="panel details-panel"><div className="section-heading compact"><h2><Clock3 size={19} /> Follow-ups</h2>{!record.discarded && <button className="text-button" onClick={() => setAction('followup')}><Plus size={15} />Log follow-up</button>}</div>
+          <section className="panel details-panel"><div className="section-heading compact"><h2><Clock3 size={19} /> Follow-ups</h2>{!record.discarded && <button className="text-button" disabled={recordBusy} onClick={() => setAction('followup')}><Plus size={15} />Log follow-up</button>}</div>
             <div className="followup-next"><CalendarDays size={18} /><div><small>NEXT FOLLOW-UP</small><strong>{formatDate(record.nextFollowUpOn)}</strong></div></div>
             {!record.followUps.length && <p className="muted">{record.discarded ? 'No follow-up notes were recorded.' : 'Record a conversation or set the next reminder. The sales stage stays unchanged.'}</p>}
             {[...record.followUps].reverse().map(f => <div className="followup-entry" key={f.id}><strong>{formatDate(f.occurredOn)}</strong><p className="pre-wrap">{f.note}</p><small>Entered {formatDate(f.recordedAt)}</small></div>)}
           </section></div>
-          <aside><PaymentPanel key={row.id} row={row} note={paymentDraft?.entityId === row.entityId ? paymentDraft.note : record.paymentNote}
+          <aside><PaymentPanel key={row.id} row={row} actions={recordActions} note={paymentDraft?.entityId === row.entityId ? paymentDraft.note : record.paymentNote}
             onNoteChange={note => setPaymentDraft({ entityId: row.entityId, note })}
             done={warning => { setPaymentDraft(null); setNotice(warning); }} />
-            <FeedbackPanel key={`feedback-${row.id}`} row={row} done={setNotice} />
+            <StockPanel key={`stock-${row.id}`} row={row} actions={recordActions} done={setNotice} />
+            <FeedbackPanel key={`feedback-${row.id}`} row={row} actions={recordActions} done={setNotice} />
             <div className="audit-note"><History size={17} /><span>Last updated {formatDate(row.createdAt)}<br />Creation and later changes are retained in history.</span></div></aside>
         </div>
         <RecordHistory id={id!} />

@@ -34,6 +34,7 @@ from .domain import (
     Resolution,
     Revision,
     StageChange,
+    StockChange,
     Write,
     add_followup,
     discard_record,
@@ -41,6 +42,7 @@ from .domain import (
     now,
     payment_change,
     stage_change,
+    stock_change,
     today,
 )
 from .firestore_storage import FirestoreRepository
@@ -588,6 +590,18 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             request,
             lambda old: feedback_change(RecordData.model_validate(old), body.data),
         )
+
+    @app.post("/api/records/{entity_id}/stock")
+    def stock(entity_id: str, body: Write[StockChange], request: Request):
+        require_id(entity_id, body.entityId)
+        return mutate(
+            "record",
+            body,
+            "stock_update",
+            request,
+            lambda old: stock_change(RecordData.model_validate(old), body.data),
+        )
+
 
     @app.get("/api/dashboard")
     def dashboard():

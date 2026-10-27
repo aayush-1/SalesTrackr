@@ -18,12 +18,14 @@ from backend.app.domain import (
     RecordData,
     Revision,
     StageChange,
+    StockChange,
     add_followup,
     feedback_change,
     now,
     payment_change,
     record_stage,
     stage_change,
+    stock_change,
     today,
 )
 from backend.app.main import create_app
@@ -72,9 +74,17 @@ def new_sale(client):
 
 
 def advance(client, revision, stage, **extra):
+    if stage == "dispatched" and not revision["data"].get("stockUpdated"):
+        revision = confirm_stock(client, revision)
     response, _ = write(
         client, "record", {"stage": stage, **extra}, f"/api/records/{revision['entityId']}/stage", revision
     )
+    assert response.status_code == 200, response.text
+    return response.json()["revision"]
+
+
+def confirm_stock(client, row):
+    response, _ = write(client, "record", {"updated": True}, f"/api/records/{row['entityId']}/stock", row)
     assert response.status_code == 200, response.text
     return response.json()["revision"]
 
@@ -293,11 +303,11 @@ def test_full_journey_and_independent_payment(client):
     assert client.get("/api/records?view=dispatched").json()["total"] == 0
     assert client.get("/api/records?view=delivered").json()["total"] == 0
     assert client.get("/api/records?view=closed").json()["total"] == 1
-    assert client.get(f"/api/entities/record/{row['entityId']}/history").json()["total"] == 7
+    assert client.get(f"/api/entities/record/{row['entityId']}/history").json()["total"] == 8
     storage = client.app.state.repo.backend
     assert len(list(storage.directory.glob("*.json"))) == 2
     assert storage.get(row["entityId"])["current"] == row
-    assert len(storage.get(row["entityId"])["history"]) == 6
+    assert len(storage.get(row["entityId"])["history"]) == 7
 
 
 def test_receipt_closes_delivered_sale_and_is_retry_safe(client):
@@ -333,9 +343,228 @@ def test_receipt_closes_delivered_sale_and_is_retry_safe(client):
     assert rejected.status_code == 422
     assert "Reopen" in rejected.json()["error"]["message"]
     history = client.get(f"/api/entities/record/{row['entityId']}/history").json()["items"]
-    assert len(history) == 7
+    assert len(history) == 8
     assert history[1]["data"]["paymentNote"] == "Awaiting bank confirmation"
     assert "closed" not in history[1]["data"]["stageDates"]
+
+
+def test_stock_confirmation_precedes_dispatch_is_retry_safe_and_read_only_on_discard(client):
+    row = new_sale(client)
+    route = f"/api/records/{row['entityId']}/stock"
+    assert row["data"]["stockUpdated"] is False
+    assert row["data"]["stockUpdatedOn"] is None
+    for stage in (None, "follow_up"):
+        if stage:
+            row = advance(client, row, stage)
+        for updated in (False, True):
+            rejected, _ = write(client, "record", {"updated": updated}, route, row)
+            assert rejected.status_code == 422
+    row = advance(client, row, "order_received")
+    assert client.get("/api/records?view=stock-pending").json()["total"] == 1
+    for target in ("dispatched", "delivered", "closed"):
+        rejected, _ = write(
+            client, "record", {"stage": target}, route.replace("/stock", "/stage"), row
+        )
+        assert rejected.status_code == 422
+    for key, value in (("stockUpdated", True), ("stockUpdatedOn", today().isoformat())):
+        rejected, _ = write(
+            client,
+            "record",
+            {"accountId": row["data"]["accountId"], key: value},
+            f"/api/records/{row['entityId']}",
+            row,
+            method="PATCH",
+        )
+        assert rejected.status_code == 422
+    counts = client.get("/api/dashboard").json()["counts"]
+    response, body = write(client, "record", {"updated": True}, route, row)
+    assert response.status_code == 200, response.text
+    confirmed = response.json()["revision"]
+    assert confirmed["action"] == "stock_update"
+    assert confirmed["data"] == {
+        **row["data"],
+        "stockUpdated": True,
+        "stockUpdatedOn": today().isoformat(),
+    }
+    assert client.post(route, json=body, headers=HEADERS).json()["revision"] == confirmed
+    assert client.get("/api/dashboard").json()["counts"] == {**counts, "stock-pending": 0}
+    stale, _ = write(client, "record", {"updated": False}, route, row)
+    assert stale.status_code == 409
+    rejected, _ = write(
+        client,
+        "record",
+        {"stage": "follow_up", "reason": "Correct order"},
+        route.replace("/stock", "/stage"),
+        confirmed,
+    )
+    assert rejected.status_code == 422 and "Undo stock" in rejected.json()["error"]["message"]
+    dispatched = advance(client, confirmed, "dispatched")
+    response, _ = write(client, "record", {"updated": False}, route, dispatched)
+    assert response.status_code == 422 and "Order in hand" in response.json()["error"]["message"]
+    reopened = advance(client, dispatched, "order_received", reason="Correct stock confirmation")
+    response, _ = write(client, "record", {"updated": False}, route, reopened)
+    assert response.status_code == 200, response.text
+    undone = response.json()["revision"]
+    assert undone["data"]["stageDates"] == reopened["data"]["stageDates"]
+    assert undone["data"]["stockUpdated"] is False and undone["data"]["stockUpdatedOn"] is None
+    rejected, _ = write(
+        client, "record", {"stage": "dispatched"}, route.replace("/stock", "/stage"), undone
+    )
+    assert rejected.status_code == 422
+    row = advance(client, undone, "dispatched")
+    row = advance(client, row, "delivered")
+    response, _ = write(client, "record", {"received": True}, route.replace("/stock", "/payment"), row)
+    assert response.status_code == 200, response.text
+    closed = response.json()["revision"]
+    response, _ = write(client, "record", {"updated": False}, route, closed)
+    assert response.status_code == 422 and "Order in hand" in response.json()["error"]["message"]
+    row = closed
+    response, _ = write(
+        client,
+        "record",
+        {"reason": "Read-only example"},
+        route.replace("/stock", "/discard"),
+        row,
+    )
+    assert response.status_code == 200
+    discarded = response.json()["revision"]
+    assert discarded["data"]["stockUpdated"] is True
+    for updated in (False, True):
+        rejected, _ = write(client, "record", {"updated": updated}, route, discarded)
+        assert rejected.status_code == 409 and rejected.json()["error"]["code"] == "discarded_record"
+    history = client.get(f"/api/entities/record/{row['entityId']}/history?limit=50").json()["items"]
+    assert confirmed in history and dispatched in history
+
+
+@pytest.mark.parametrize("stage_index", [2, 3, 4, 5])
+def test_existing_dispatched_delivered_and_closed_records_need_no_stock_migration(client, stage_index):
+    sale = new_sale(client)
+    legacy = record_at(stage_index, paid=stage_index == 5).model_dump(
+        mode="json", exclude={"stockUpdated", "stockUpdatedOn"}
+    )
+    legacy["accountId"] = sale["data"]["accountId"]
+    original = revision("record", uuid4().hex, legacy)
+    repo = client.app.state.repo
+    repo.commit(original)
+    assert client.get(f"/api/records/{original['entityId']}/detail").json()["revision"] == original
+    assert repo.current(original["entityId"]) == original
+    assert len(repo.read_history(original["entityId"])) == 1
+    pending = client.get("/api/records?view=stock-pending").json()
+    assert [row["entityId"] for row in pending["items"]] == [original["entityId"]]
+    normalized = RecordData.model_validate(legacy)
+    assert not normalized.stockUpdated and normalized.stockUpdatedOn is None
+    response, _ = write(
+        client,
+        "record",
+        {"updated": True},
+        f"/api/records/{original['entityId']}/stock",
+        original,
+    )
+    assert response.status_code == 200, response.text
+    current = response.json()["revision"]
+    assert current["data"]["stockUpdated"] is True
+    assert current["data"]["stageDates"] == legacy["stageDates"]
+    assert current["data"]["paymentReceived"] == legacy["paymentReceived"]
+    assert original in repo.read_history(original["entityId"])
+    assert client.get("/api/records?view=stock-pending").json()["total"] == 0
+
+
+def test_stock_dates_and_dispatch_corrections():
+    record = record_at(3)
+    old_date = record.stageDates["dispatched"]
+    confirmed = RecordData.model_validate(
+        {
+            **record.model_dump(),
+            "stockUpdated": True,
+            "stockUpdatedOn": old_date,
+        }
+    )
+    assert stock_change(confirmed, StockChange(updated=True)).stockUpdatedOn == old_date
+    with pytest.raises(Problem, match="Order in hand"):
+        stock_change(confirmed, StockChange(updated=False))
+    ordered = stage_change(
+        confirmed,
+        StageChange(
+            stage="order_received", occurredOn=confirmed.stageDates["order_received"], reason="Correction"
+        ),
+    )
+    assert record_stage(ordered.model_dump()) == "order_received"
+    undone = stock_change(ordered, StockChange(updated=False))
+    assert undone.stockUpdatedOn is None
+    assert stage_change(
+        confirmed, StageChange(stage="dispatched", occurredOn=today(), reason="Correction")
+    ).stockUpdatedOn == old_date
+    current_stock = stock_change(record_at(2), StockChange(updated=True))
+    with pytest.raises(Problem, match="Dispatch date cannot precede"):
+        stage_change(current_stock, StageChange(stage="dispatched", occurredOn=today() - timedelta(days=1)))
+    for invalid in (
+        {**record.model_dump(), "stockUpdated": True},
+        {**record.model_dump(), "stockUpdatedOn": today()},
+        {
+            **record.model_dump(), "stockUpdated": True,
+            "stockUpdatedOn": record.stageDates["order_received"] - timedelta(days=1),
+        },
+        {**record.model_dump(), "stockUpdated": True, "stockUpdatedOn": today() + timedelta(days=1)},
+        {**record_at(1).model_dump(), "stockUpdated": True, "stockUpdatedOn": today()},
+    ):
+        with pytest.raises(ValidationError, match="Stock|stock"):
+            RecordData.model_validate(invalid)
+
+
+@pytest.mark.parametrize("stock_first", [False, True])
+def test_stock_and_payment_can_be_confirmed_independently_before_dispatch(client, stock_first):
+    row = new_sale(client)
+    for stage in STAGES[1:3]:
+        row = advance(client, row, stage)
+    route = f"/api/records/{row['entityId']}"
+    assert client.get("/api/records?view=stock-pending").json()["total"] == 1
+    actions = [("stock", {"updated": True}), ("payment", {"received": True})]
+    if not stock_first:
+        actions.reverse()
+    rejected, _ = write(client, "record", {"stage": "dispatched"}, route + "/stage", row)
+    assert rejected.status_code == 422
+    for suffix, data in actions:
+        response, body = write(client, "record", data, route + "/" + suffix, row)
+        assert response.status_code == 200, response.text
+        row = response.json()["revision"]
+        retry = client.post(route + "/" + suffix, json=body, headers=HEADERS)
+        assert retry.status_code == 200 and retry.json()["revision"] == row
+        assert record_stage(row["data"]) == "order_received"
+        if not row["data"]["stockUpdated"]:
+            rejected, _ = write(client, "record", {"stage": "dispatched"}, route + "/stage", row)
+            assert rejected.status_code == 422
+    for stage in STAGES[3:]:
+        row = advance(client, row, stage)
+    assert record_stage(row["data"]) == "closed"
+    assert row["data"]["stockUpdated"] and row["data"]["paymentReceived"]
+    assert client.get("/api/records?view=stock-pending").json()["total"] == 0
+
+
+def test_existing_delivered_records_still_close_on_payment_without_a_separate_stock_gate(client):
+    sale = new_sale(client)
+    data = record_at(4).model_dump(mode="json", exclude={"stockUpdated", "stockUpdatedOn"})
+    data["accountId"] = sale["data"]["accountId"]
+    original = revision("record", uuid4().hex, {
+        **data, "paymentReceived": True, "paymentReceivedOn": data["stageDates"]["order_received"],
+    })
+    client.app.state.repo.commit(original)
+    assert not stage_change(
+        RecordData.model_validate(original["data"]), StageChange(stage="closed")
+    ).stockUpdated
+    route = f"/api/records/{original['entityId']}"
+    response, _ = write(client, "record", {"updated": True}, route + "/stock", original)
+    assert response.status_code == 200
+    assert response.json()["revision"]["data"]["stageDates"] == data["stageDates"]
+    legacy = revision("record", uuid4().hex, data)
+    client.app.state.repo.commit(legacy)
+    response, _ = write(
+        client, "record", {"received": True}, f"/api/records/{legacy['entityId']}/payment", legacy
+    )
+    assert response.status_code == 200, response.text
+    closed = response.json()["revision"]
+    assert closed["data"]["stageDates"] == {**data["stageDates"], "closed": today().isoformat()}
+    assert closed["data"]["paymentReceived"] and not closed["data"]["stockUpdated"]
+    assert legacy in client.app.state.repo.read_history(legacy["entityId"])
 
 
 def test_feedback_receipt_queue_retry_history_and_reopening(client):
@@ -402,7 +631,7 @@ def test_feedback_requires_closure(stage_index):
 
 
 def test_feedback_dates_and_legacy_records():
-    closed = record_at(5, True)
+    closed = record_at(5, True, stocked=True)
     legacy = closed.model_dump(mode="json", exclude={"feedbackReceived", "feedbackReceivedOn"})
     normalized = RecordData.model_validate(legacy)
     assert not normalized.feedbackReceived and normalized.feedbackReceivedOn is None
@@ -437,9 +666,11 @@ def test_feedback_cannot_bypass_action_and_is_retained_on_discard(client):
         assert rejected.status_code == 422
     for stage in STAGES[1:5]:
         row = advance(client, row, stage)
-    for suffix in ("payment", "feedback"):
+    for suffix, data in (
+        ("stock", {"updated": True}), ("payment", {"received": True}), ("feedback", {"received": True}),
+    ):
         response, _ = write(
-            client, "record", {"received": True}, f"/api/records/{row['entityId']}/{suffix}", row
+            client, "record", data, f"/api/records/{row['entityId']}/{suffix}", row
         )
         assert response.status_code == 200, response.text
         row = response.json()["revision"]
@@ -511,6 +742,8 @@ def test_legacy_workflow_and_financial_history_remain_readable(tmp_path, stage_i
             StageChange(stage=target, quotationReference="Q-NEW" if target == "follow_up" else None),
         )
     else:
+        if stage_index == 5:
+            normalized = stock_change(normalized, StockChange(updated=True))
         changed = payment_change(normalized, PaymentChange(received=True, note="Receipt confirmed"))
         assert changed.orderAmountPaise == 100000
         assert changed.amountReceivedPaise == data["amountReceivedPaise"]
@@ -664,6 +897,7 @@ def test_current_workflow_requires_followup_but_not_quotation():
             "stageDates": {"new_lead": today(), "order_received": today()},
         }
     )
+    legacy_gap = stock_change(legacy_gap, StockChange(updated=True))
     assert (
         record_stage(stage_change(legacy_gap, StageChange(stage="dispatched")).model_dump()) == "dispatched"
     )
@@ -691,6 +925,7 @@ def test_stage_tabs_and_dashboard_use_only_current_status(client):
         "pending": [2, 3, 4],
         "paid": [5, 6],
         "feedback-pending": [5],
+        "stock-pending": [2, 3, 4, 5, 6],
         "discarded": [],
     }
     assert set(counts) == set(expected)
@@ -1105,7 +1340,7 @@ def test_guards_and_unknown_routes(client):
     assert client.get("/healthz").json() == {"status": "ok"}
 
 
-def record_at(stage_index=0, paid=False):
+def record_at(stage_index=0, paid=False, stocked=False):
     acquired = today() - timedelta(days=60)
     return RecordData(
         accountId=uuid4().hex,
@@ -1114,12 +1349,14 @@ def record_at(stage_index=0, paid=False):
         stageDates={s: acquired + timedelta(days=i) for i, s in enumerate(STAGES[: stage_index + 1])},
         paymentReceived=paid,
         paymentReceivedOn=acquired + timedelta(days=2) if paid else None,
+        stockUpdated=stocked,
+        stockUpdatedOn=acquired + timedelta(days=3) if stocked else None,
     )
 
 
 @pytest.mark.parametrize("stage_index", range(5))
 def test_next_stage(stage_index):
-    record = record_at(stage_index, paid=stage_index >= 2)
+    record = record_at(stage_index, paid=stage_index >= 2, stocked=stage_index >= 2)
     next_stage = STAGES[stage_index + 1]
     result = stage_change(
         record,
@@ -1143,7 +1380,7 @@ def test_dates_and_receipt_invariants():
             StageChange(stage="follow_up", quotationReference="Q", occurredOn=today() - timedelta(days=61)),
         )
     with pytest.raises(ValidationError):
-        stage_change(record_at(4), StageChange(stage="closed"))
+        stage_change(record_at(4, stocked=True), StageChange(stage="closed"))
     with pytest.raises(Problem):
         payment_change(record, PaymentChange(received=True))
     with pytest.raises(Problem):
