@@ -123,6 +123,8 @@ class RecordData(RecordFields):
     paymentNote: Text = ""
     feedbackReceived: bool = False
     feedbackReceivedOn: date | None = None
+    stockUpdated: bool = False
+    stockUpdatedOn: date | None = None
     nextFollowUpOn: date | None = None
     followUps: list[FollowUpEntry] = Field(default_factory=list, max_length=2000)
 
@@ -179,6 +181,13 @@ class RecordData(RecordFields):
                 raise ValueError("Feedback date must be between closure and today.")
         elif self.feedbackReceivedOn is not None:
             raise ValueError("A feedback date requires feedback receipt.")
+        if self.stockUpdated:
+            if not ordered or self.stockUpdatedOn is None:
+                raise ValueError("Stock update requires Order in hand and an updated date.")
+            if not self.stageDates["order_received"] <= self.stockUpdatedOn <= today():
+                raise ValueError("Stock update date must be between order confirmation and today.")
+        elif self.stockUpdatedOn is not None:
+            raise ValueError("A stock update date requires stock update confirmation.")
         return self
 
 
@@ -198,6 +207,10 @@ class PaymentChange(Model):
 
 class FeedbackChange(Model):
     received: bool
+
+
+class StockChange(Model):
+    updated: bool
 
 
 T = TypeVar("T")
@@ -257,6 +270,13 @@ def stage_change(record: RecordData, change: StageChange) -> RecordData:
         raise Problem("A correction or backtrack requires a reason.")
     if change.stage != "closed" and record.feedbackReceived:
         raise Problem("Undo feedback received before reopening the record.")
+    if target < STAGES.index("order_received") and record.stockUpdated:
+        raise Problem("Undo stock updated before removing order confirmation.")
+    if change.stage == "dispatched":
+        if not record.stockUpdated:
+            raise Problem("Confirm the stock update before dispatching this sales record.")
+        if (change.occurredOn or today()) < record.stockUpdatedOn:
+            raise Problem("Dispatch date cannot precede the stock update date.")
     before_order = target < STAGES.index("order_received")
     if before_order and record.paymentReceived:
         raise Problem("Correct the payment before removing order confirmation.")
@@ -310,6 +330,19 @@ def feedback_change(record: RecordData, change: FeedbackChange) -> RecordData:
             "feedbackReceivedOn": (record.feedbackReceivedOn or today()) if change.received else None,
         }
     )
+
+
+def stock_change(record: RecordData, change: StockChange) -> RecordData:
+    if "order_received" not in record.stageDates:
+        raise Problem("Confirm the order before confirming a stock update.")
+    if "dispatched" in record.stageDates and not change.updated:
+        raise Problem("Correct the record back to Order in hand before undoing stock confirmation.")
+    result = {
+        **record.model_dump(),
+        "stockUpdated": change.updated,
+        "stockUpdatedOn": (record.stockUpdatedOn or today()) if change.updated else None,
+    }
+    return RecordData.model_validate(result)
 
 
 def add_followup(record: RecordData, entry: FollowUp) -> RecordData:

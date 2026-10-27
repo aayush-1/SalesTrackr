@@ -1294,10 +1294,10 @@ footer {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.payment-panel,.feedback-panel {
+.payment-panel,.feedback-panel,.stock-panel {
   padding: 24px;
 }
-.payment-panel h2,.feedback-panel h2 {
+.payment-panel h2,.feedback-panel h2,.stock-panel h2 {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1728,7 +1728,7 @@ th {
     align-items: flex-start;
     flex-direction: column;
   }
-  .details-panel,.payment-panel,.feedback-panel {
+  .details-panel,.payment-panel,.feedback-panel,.stock-panel {
     padding: 20px;
   }
   .form-footer {
