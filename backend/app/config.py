@@ -19,6 +19,11 @@ class Settings:
     recovery_admins: tuple[str, ...] = ()
     backup_schedule_ready: bool = False
     backup_folder_id: str = ""
+    manufacturing_enabled: bool = False
+    manufacturing_project: str = ""
+    manufacturing_workspace: str = "buildtrackr"
+    manufacturing_backup_folder_id: str = ""
+    manufacturing_backup_storage: str = "local"
 
     @classmethod
     def load(cls):
@@ -46,7 +51,18 @@ class Settings:
             ),
             backup_schedule_ready=os.getenv("BACKUP_SCHEDULE_READY", "").lower() == "true",
             backup_folder_id=os.getenv("BACKUP_DRIVE_FOLDER_ID", ""),
+            manufacturing_enabled=os.getenv("BUILDTRACKR_ENABLED", "").lower() == "true",
+            manufacturing_project=os.getenv("BUILDTRACKR_FIRESTORE_PROJECT_ID", ""),
+            manufacturing_workspace=os.getenv("BUILDTRACKR_WORKSPACE_ID", "buildtrackr"),
+            manufacturing_backup_folder_id=os.getenv("BUILDTRACKR_BACKUP_DRIVE_FOLDER_ID", ""),
+            manufacturing_backup_storage=os.getenv("BUILDTRACKR_BACKUP_STORAGE", "local"),
         )
+        if settings.manufacturing_enabled and mode != "demo":
+            raise RuntimeError(
+                "BuildTrackr production enablement requires a separate reviewed cutover."
+            )
+        if settings.manufacturing_backup_storage not in ("local", "drive"):
+            raise RuntimeError("BUILDTRACKR_BACKUP_STORAGE must be local or drive.")
         if settings.storage_backend not in ("drive", "firestore"):
             raise RuntimeError("STORAGE_BACKEND must be drive or firestore.")
         if settings.storage_backend == "firestore":

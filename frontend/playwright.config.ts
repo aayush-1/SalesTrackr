@@ -6,7 +6,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const python = process.platform === 'win32' ? '.venv\\Scripts\\python.exe' : '.venv/bin/python';
 export default defineConfig({
   testDir: './tests',
-  testIgnore: /(?:firestore-backup|record-cleanup)\.spec\.ts/,
+  testIgnore: /(?:firestore-backup|record-cleanup|buildtrackr|manufacturing-records|manufacturing-recovery|manufacturing-cleanup|manufacturing-spreadsheet)\.spec\.ts/,
   workers: 1,
   use: { baseURL: 'http://127.0.0.1:8011', viewport: { width: 1440, height: 1000 }, trace: 'retain-on-failure' },
   webServer: {

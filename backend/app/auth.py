@@ -56,7 +56,10 @@ def protect_mutation(request: Request, settings: Settings):
     if origin and origin not in allowed:
         raise Problem("This page is not an allowed application origin.", 403, "csrf")
     archive_upload = (
-        request.url.path in ("/api/backups/inspect", "/api/backups/restore")
+        request.url.path in (
+            "/api/backups/inspect", "/api/backups/restore",
+            "/api/manufacturing/backups/inspect", "/api/manufacturing/backups/restore",
+        )
         and request.headers.get("content-type", "").split(";")[0] == "application/zip"
     )
     if not archive_upload and "application/json" not in request.headers.get("content-type", ""):

@@ -1,8 +1,8 @@
 import { StrictMode, useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Link, NavLink, Outlet, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom';
 import {
-  ArchiveX, ArrowUpRight, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
+  ArchiveX, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
   Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon, Truck,
 } from 'lucide-react';
 import { RefreshContext, WorkspaceContext, useResource } from './api';
@@ -13,6 +13,13 @@ import { AccountDetail, AccountForm, Accounts } from './pages/accounts';
 import { Conflicts, DashboardPage, Records } from './pages/lists';
 import { NewRecordPage, RecordDetail } from './pages/record';
 import { Settings } from './pages/settings';
+import {
+  ManufacturingNotFound, ManufacturingOverview,
+  ManufacturingSettings, ManufacturingShell,
+} from './pages/manufacturing';
+import { BuildDetail, BuildDirectory } from './pages/buildtrackr';
+import { ManufacturingRecordDetailPage, ManufacturingRecordsPage, NewManufacturingRecordPage } from './pages/manufacturing-records';
+import { WorkspaceSwitcher } from './workspace-switcher';
 import './styles.css';
 
 function Shell() {
@@ -39,9 +46,9 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
     ['pending', CircleDollarSign], ['paid', CircleDollarSign], ['closed', CheckCheck],
     ['feedback-pending', MessageSquareText], ['discarded', ArchiveX],
   ] as const;
-  return <div className="app">
+  return <div className={`app ${open ? 'navigation-open' : ''}`}>
     <aside className={`sidebar ${open ? 'open' : ''}`}>
-      <Link to="/" className="brand" onClick={() => setOpen(false)}><span className="brand-icon"><ArrowUpRight size={23} /></span>SalesTrackr<span className="brand-dot">.</span></Link>
+      <WorkspaceSwitcher current="sales" onSwitch={() => setOpen(false)} />
       <button className="mobile-close icon-button" onClick={() => setOpen(false)} aria-label="Close navigation"><PanelLeftClose /></button>
       <div className="workspace-label">YOUR SALES WORKSPACE</div>
       <nav aria-label="Main navigation">
@@ -55,9 +62,9 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
       </div>
     </aside>
     <div className="workspace">
-      <div className="topbar"><div className="topbar-left"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setOpen(true)}><Menu /></button><span className="breadcrumb">Workspace <span>/</span> Sales management</span></div>
-        <div className="topbar-actions"><span className="connection"><span className="online-dot" />{identity.data?.mode === 'demo' ? 'Local demo' : identity.data?.storageBackend === 'firestore' ? 'Firestore-backed' : 'Drive-backed'}</span>
-          <button className="icon-button" title="Refresh data" aria-label="Refresh data" onClick={onRefresh}><RefreshCw size={17} /></button><div className="avatar light">S</div></div>
+      <div className="workspace-mobile-header">
+        <button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setOpen(true)}><Menu /></button>
+        <WorkspaceSwitcher current="sales" onSwitch={() => setOpen(false)} />
       </div>
       <main>
         {identity.error && <Alert>{identity.error}</Alert>}
@@ -67,14 +74,29 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
         {identity.data?.mode === 'demo' && <div className="demo-banner"><span>DEMO WORKSPACE</span>Sample data is saved locally. Google Drive is not connected.</div>}
         {initialIdentity.current ? <WorkspaceContext.Provider value={initialIdentity.current}><Outlet context={identity.data || initialIdentity.current} /></WorkspaceContext.Provider> : identity.loading ? <Loading /> : <Alert>Workspace identity is unavailable. Refresh this page before continuing.</Alert>}
       </main>
-      <footer>SalesTrackr <span>{status.data?.syncedAt
+      <footer>SalesTrackr <span className="sync-status"><span>{status.data?.syncedAt
         ? `Last synchronized ${new Date(status.data.syncedAt).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST${status.data.complete ? '' : ' · incomplete'}`
-        : 'Checking connection...'}</span></footer>
+        : 'Checking connection...'}</span>
+        <button className="icon-button" title="Refresh data" aria-label="Refresh data" onClick={onRefresh}><RefreshCw size={14} /></button>
+      </span></footer>
     </div>
   </div>;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><Routes>
+  <Route path="manufacturing" element={<ManufacturingShell />}>
+    <Route index element={<ManufacturingOverview />} />
+    {(['products', 'operations', 'partners', 'contacts'] as const).map(kind => <Route key={kind}>
+      <Route path={kind} element={<BuildDirectory key={kind} kind={kind} />} />
+      <Route path={`${kind}/:id`} element={<BuildDetail key={kind} kind={kind} />} />
+    </Route>)}
+    <Route path="records" element={<ManufacturingRecordsPage />} />
+    <Route path="records/new" element={<NewManufacturingRecordPage />} />
+    <Route path="records/:id" element={<ManufacturingRecordDetailPage />} />
+    <Route path="blueprint" element={<Navigate replace to="/manufacturing/operations" />} />
+    <Route path="settings" element={<ManufacturingSettings />} />
+    <Route path="*" element={<ManufacturingNotFound />} />
+  </Route>
   <Route element={<Shell />}>
     <Route index element={<DashboardPage />} />
     <Route path="accounts" element={<Accounts />} />

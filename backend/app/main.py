@@ -44,6 +44,7 @@ from .domain import (
     today,
 )
 from .firestore_storage import FirestoreRepository
+from .manufacturing_api import manufacturing_router
 from .queries import VIEWS, account_matches, account_name_key, matches, query_records
 from .record_cleanup import CleanupWrite, RecordCleanup
 from .storage import DriveBackend, LocalBackend, Repository, digest
@@ -79,6 +80,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     app = FastAPI(title="SalesTrackr API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.repo = repo
     app.state.recovery = recovery
+    app.include_router(manufacturing_router(settings))
 
     @app.exception_handler(GoogleAPICallError)
     async def database_handler(request, error):
@@ -120,7 +122,10 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 protect_mutation(request, settings)
                 if request.method not in ("GET", "HEAD", "OPTIONS"):
                     limit = (
-                        MAX_ARCHIVE if request.url.path in ("/api/backups/inspect", "/api/backups/restore")
+                        MAX_ARCHIVE if request.url.path in (
+                            "/api/backups/inspect", "/api/backups/restore",
+                            "/api/manufacturing/backups/inspect", "/api/manufacturing/backups/restore",
+                        )
                         else 128_000
                     )
                     parts, size = [], 0
