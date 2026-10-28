@@ -3,7 +3,7 @@ import type { APIRequestContext, Page } from '@playwright/test';
 import type { ManufacturingDetail } from '../src/manufacturing-types';
 
 async function create(page: Page, kind: string, name: string, extra: () => Promise<void> = async () => {}) {
-  const singular = kind === 'companies' ? 'partner' : kind.slice(0, -1);
+  const singular = kind === 'partners' || kind === 'companies' ? 'supplier' : kind.slice(0, -1);
   await page.goto(`/manufacturing/${kind}`);
   await page.getByRole('button', { name: `New ${singular}`, exact: true }).click();
   const form = page.getByRole('dialog');
@@ -22,16 +22,47 @@ async function addStep(page: Page, name: string) {
 }
 async function assign(page: Page, operation: string, partner: string, contact?: string) {
   const step = page.locator('.bt-step').filter({ has: page.getByRole('link', { name: operation, exact: true }) });
-  await step.getByRole('button', { name: 'Assign partner', exact: true }).click();
-  await page.getByLabel('Manufacturing partner', { exact: true }).selectOption({ label: partner });
+  await step.getByRole('button', { name: 'Assign supplier', exact: true }).click();
+  await page.getByLabel('Manufacturing supplier', { exact: true }).selectOption({ label: partner });
   if (contact) await page.getByLabel('Company contact (optional)', { exact: true }).selectOption({ label: contact });
-  await page.getByRole('dialog').getByRole('button', { name: 'Assign partner', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Assign supplier', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
 }
 async function snapshot(request: APIRequestContext, url: string) {
   const id = new URL(url).pathname.split('/').at(-1);
   return await (await request.get(`/api/manufacturing/products/${id}`)).json() as ManufacturingDetail;
 }
+
+test('a product shows its part number and a retryable one-click Drive folder link', async ({ page, context }) => {
+  const driveUrl = 'https://drive.google.com/drive/folders/test-product-folder';
+  let unavailable = true;
+  await page.route('**/api/manufacturing/products/*/drive-folder', async route => {
+    if (unavailable) return route.fulfill({ status: 503, json: { error: { message: 'Reconnect the product folder.' } } });
+    await route.fulfill({ json: {
+      workspaceId: route.request().headers()['x-producttrackr-workspace'],
+      generation: route.request().headers()['x-producttrackr-generation'],
+      configured: true, url: driveUrl,
+    } });
+  });
+  await context.route(driveUrl, route => route.fulfill({ contentType: 'text/html', body: '<title>Product files</title>' }));
+  await create(page, 'products', 'Drawing component', async () => {
+    await page.getByLabel('Part number', { exact: true }).fill('DRAW-042');
+  });
+  await expect(page.getByRole('heading', { name: 'Drawing component', exact: true })).toBeVisible();
+  await expect(page.getByText('Reconnect the product folder.', { exact: true })).toBeVisible();
+  unavailable = false;
+  await page.getByRole('button', { name: 'Retry folder connection', exact: true }).click();
+  const link = page.getByRole('link', { name: 'Open Drive folder', exact: true });
+  await expect(link).toHaveAttribute('href', driveUrl);
+  const popup = page.waitForEvent('popup');
+  await link.click();
+  const drive = await popup;
+  await expect(drive).toHaveURL(driveUrl);
+  await drive.close();
+  await page.reload();
+  await expect(link).toHaveAttribute('href', driveUrl);
+  await expect(page.getByRole('region', { name: 'Product files' })).toContainText('not drawings or uploaded files');
+});
 
 test('connected directories, product-specific operations, primary replacement and persistence', async ({ page, request }) => {
   const errors: string[] = [];
@@ -41,12 +72,12 @@ test('connected directories, product-specific operations, primary replacement an
   const companyA = await create(page, 'partners', 'Company A');
   await create(page, 'partners', 'Company B');
   await create(page, 'partners', 'Independent specialist', async () => {
-    await page.getByLabel('Partner type', { exact: true }).selectOption('individual');
+    await page.getByLabel('Supplier type', { exact: true }).selectOption('individual');
     await page.getByLabel('Phone', { exact: true }).fill('100200300');
   });
   await create(page, 'partners', 'JSD', async () => { await page.getByLabel('Relationship', { exact: true }).selectOption('internal'); });
   const contact = await create(page, 'contacts', 'Alex at A', async () => {
-    await page.getByLabel('Company partner', { exact: true }).selectOption({ label: 'Company A' });
+    await page.getByLabel('Company supplier', { exact: true }).selectOption({ label: 'Company A' });
   });
   const gear = await create(page, 'products', 'Gear');
   for (const name of operations) await addStep(page, name);
@@ -60,7 +91,7 @@ test('connected directories, product-specific operations, primary replacement an
   await expect(laser.locator('tr').filter({ hasText: 'Company B' })).toContainText('Primary');
   await laser.getByRole('button', { name: 'Remove Company B assignment' }).click();
   await expect(page.getByRole('button', { name: 'Remove assignment', exact: true })).toBeDisabled();
-  await page.getByLabel('Replacement primary partner').selectOption({ label: 'Company A' });
+  await page.getByLabel('Replacement primary supplier').selectOption({ label: 'Company A' });
   await page.getByRole('button', { name: 'Remove assignment', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(laser.locator('tr').filter({ hasText: 'Company A' })).toContainText('Primary');
@@ -90,8 +121,13 @@ test('connected directories, product-specific operations, primary replacement an
   await expect(page.getByRole('heading', { name: 'Company contacts', exact: true })).toBeVisible();
   await expect(page.locator('section').filter({ has: page.getByRole('heading', { name: 'Company contacts', exact: true }) }).getByRole('link', { name: 'Alex at A', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Gear', exact: true })).toBeVisible();
+  const references = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Connected product operations', exact: true }) });
+  await expect(references.getByRole('columnheader')).toHaveText(['Product', 'Operation', 'Contact', 'Assignment']);
+  await expect(references.locator('tbody tr').first().getByRole('cell').nth(0)).toHaveText('Gear');
+  await expect(references.locator('tbody tr').first().getByRole('cell').nth(1).getByRole('link', { name: 'Laser cutting', exact: true })).toBeVisible();
   await page.goto(contact);
   await expect(page.getByRole('link', { name: 'Gear', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader')).toHaveText(['Product / operation', 'Supplier', 'Contact', 'Assignment']);
   await page.goto('/manufacturing/contacts');
   await page.getByLabel('Filter contacts by company').selectOption({ label: 'Company B' });
   await expect(page.getByText('No contacts match', { exact: true })).toBeVisible();
@@ -134,7 +170,7 @@ test('manufacturing edits retain unsaved-change and stale-version protection', a
   await expect(page.getByRole('dialog')).toBeVisible();
   const current = await snapshot(request, product);
   const response = await request.put(`/api/manufacturing/products/${current.entity.id}`, {
-    headers: { 'X-SalesTrackr-Request': '1', 'X-BuildTrackr-Workspace': current.workspaceId, 'X-BuildTrackr-Generation': current.generation },
+    headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': current.workspaceId, 'X-ProductTrackr-Generation': current.generation },
     data: { id: current.entity.id, writeId: crypto.randomUUID().replaceAll('-', ''), baseVersion: current.entity.version, data: { name: 'Newer revision' } },
   });
   expect(response.ok()).toBe(true);
@@ -232,17 +268,17 @@ test('an unconfirmed inline operation retries without losing the product draft o
   expect(operations.total).toBe(1);
 });
 
-test('products show editable Product IDs and search by either name or ID', async ({ page, request }) => {
+test('products show editable Part numbers and search by either name or ID', async ({ page, request }) => {
   const product = await create(page, 'products', 'Searchable Precision Gear', async () => {
-    await page.getByLabel('Product ID', { exact: true }).fill('PID-572');
+    await page.getByLabel('Part number', { exact: true }).fill('PID-572');
   });
-  await expect(page.locator('.bt-master-details')).toContainText('Product ID');
+  await expect(page.locator('.bt-master-details')).toContainText('Part number');
   await expect(page.locator('.bt-master-details')).toContainText('PID-572');
   await page.goto('/manufacturing/products');
-  await expect(page.getByRole('columnheader', { name: 'Product ID', exact: true })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'Part number', exact: true })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'Reference', exact: true })).toHaveCount(0);
   const search = page.getByRole('textbox', { name: 'Search products', exact: true });
-  await expect(search).toHaveAttribute('placeholder', 'Search by name or product ID...');
+  await expect(search).toHaveAttribute('placeholder', 'Search by name or part number...');
   for (const term of ['precision', 'pId-572', '572']) {
     await search.fill(term);
     await expect(page.locator('tbody tr')).toHaveCount(1);
@@ -251,8 +287,8 @@ test('products show editable Product IDs and search by either name or ID', async
   }
   await page.getByRole('link', { name: 'Searchable Precision Gear', exact: true }).click();
   await page.getByRole('button', { name: 'Edit product', exact: true }).click();
-  await expect(page.getByLabel('Product ID', { exact: true })).toHaveValue('PID-572');
-  await page.getByLabel('Product ID', { exact: true }).fill('PID-975');
+  await expect(page.getByLabel('Part number', { exact: true })).toHaveValue('PID-572');
+  await page.getByLabel('Part number', { exact: true }).fill('PID-975');
   await page.getByRole('button', { name: 'Save changes', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   const stored = await snapshot(request, product);

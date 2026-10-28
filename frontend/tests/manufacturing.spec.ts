@@ -1,17 +1,17 @@
 import { expect, test } from '@playwright/test';
 
-// Layout coverage stays independent of emulator availability; buildtrackr.spec uses real storage.
+// Layout coverage stays independent of emulator availability; producttrackr.spec uses real storage.
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/manufacturing/**', route => route.fulfill({ json: {
     workspaceId: 'layout-fixture', generation: 'layout-generation', mode: 'demo', storageBackend: 'firestore',
-    items: [], total: 0, counts: { active: 0, all: 0, ready: 0, in_progress: 0, completed: 0, cancelled: 0 },
-    provider: 'local', retention: 10, location: 'Local simulated BuildTrackr backup folder',
+    items: [], total: 0, supplierCount: 0, jobCount: 0, counts: { active: 0, all: 0, ready: 0, in_progress: 0, completed: 0, cancelled: 0 },
+    provider: 'local', retention: 10, location: 'Local simulated ProductTrackr backup folder',
     backups: [], canBackup: true, canRestore: true, lastBackupAt: null, lastError: null,
     canDelete: true, cleanupInProgress: false, pending: null,
   } }));
 });
 
-test('BuildTrackr has separate directories and settings without sales API calls', async ({ page }) => {
+test('ProductTrackr has separate directories and settings without sales API calls', async ({ page }) => {
   const sales: string[] = [], errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
@@ -23,11 +23,11 @@ test('BuildTrackr has separate directories and settings without sales API calls'
   await expect(page.locator('.topbar,.breadcrumb')).toHaveCount(0);
   await expect(page.getByRole('navigation', { name: 'Main navigation' })).toHaveCount(0);
   await expect(page.locator('.demo-banner')).toHaveCount(0);
-  for (const title of ['Products', 'Operations', 'Partners', 'Contacts']) {
+  for (const title of ['Products', 'Operations', 'Suppliers', 'Contacts']) {
     await page.getByRole('navigation', { name: 'Manufacturing navigation' }).getByRole('link', { name: title, exact: true }).click();
     await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
   }
-  await page.getByRole('link', { name: 'BuildTrackr settings', exact: true }).click();
+  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'General', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab', { name: 'Backup and recovery', exact: true })).toHaveCount(0);
   await expect(page.getByRole('tab', { name: 'Record cleanup', exact: true })).toHaveCount(1);
@@ -49,8 +49,19 @@ test('BuildTrackr has separate directories and settings without sales API calls'
   await page.goto('/manufacturing/blueprint');
   await expect(page).toHaveURL(/\/manufacturing\/operations$/);
   await page.goto('/manufacturing/unknown-page');
-  await expect(page.getByRole('heading', { name: 'BuildTrackr page not found' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'ProductTrackr page not found' })).toBeVisible();
   expect(sales).toEqual([]); expect(errors).toEqual([]);
+});
+
+test('production ProductTrackr shows cloud storage without a local-preview banner', async ({ page }) => {
+  await page.route('**/api/manufacturing/meta', route => route.fulfill({ json: {
+    workspaceId: 'producttrackr', generation: 'production-generation', mode: 'production', storageBackend: 'firestore',
+  } }));
+  await page.goto('/manufacturing/settings');
+  await expect(page.getByRole('heading', { name: 'ProductTrackr settings', exact: true })).toBeVisible();
+  await expect(page.locator('.unit-preview-notice')).toHaveCount(0);
+  await expect(page.getByRole('tabpanel')).toContainText('Cloud Firestore');
+  await expect(page.getByRole('tabpanel')).not.toContainText('Local Firestore emulator');
 });
 
 test('workspace switcher changes the entire space and leaves sales settings intact', async ({ page }) => {
@@ -67,11 +78,11 @@ test('workspace switcher changes the entire space and leaves sales settings inta
   await page.getByRole('heading', { name: 'A clear view of your sales.', exact: true }).click();
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   await trigger.click();
-  await page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^BuildTrackr/ }).click();
-  await expect(trigger).toContainText('BuildTrackr');
+  await page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^ProductTrackr/ }).click();
+  await expect(trigger).toContainText('ProductTrackr');
   await expect(page.getByRole('link', { name: 'All sales records', exact: true })).toHaveCount(0);
-  await page.getByRole('link', { name: 'BuildTrackr settings', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'BuildTrackr settings', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'ProductTrackr settings', exact: true })).toBeVisible();
   await trigger.click();
   await page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^SalesTrackr/ }).click();
   await expect(page.getByRole('heading', { name: 'A clear view of your sales.', exact: true })).toBeVisible();
@@ -85,7 +96,7 @@ test('workspace switching honours the sales unsaved-changes warning', async ({ p
   await page.goto('/accounts/new');
   await page.getByLabel('Company name *', { exact: true }).fill('Unsaved workspace switch');
   await page.getByRole('button', { name: 'Switch workspace', exact: true }).click();
-  const manufacturing = page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^BuildTrackr/ });
+  const manufacturing = page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^ProductTrackr/ });
   page.once('dialog', dialog => dialog.dismiss()); await manufacturing.click();
   await expect(page).toHaveURL(/\/accounts\/new$/);
   await expect(page.getByLabel('Company name *', { exact: true })).toHaveValue('Unsaved workspace switch');
@@ -112,7 +123,7 @@ test('manufacturing navigation and settings fit mobile and narrow desktop screen
   await expect(page.getByRole('heading', { name: 'Products', exact: true })).toBeVisible();
   await expect(page.locator('.sidebar')).not.toHaveClass(/open/);
   await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
-  await page.getByRole('link', { name: 'BuildTrackr settings', exact: true }).click();
+  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
   await page.getByRole('tab', { name: 'Data & recovery', exact: true }).click();
   await expect(page.getByRole('tabpanel')).toContainText('Local simulation only.');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

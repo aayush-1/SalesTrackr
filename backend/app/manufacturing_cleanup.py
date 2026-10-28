@@ -122,11 +122,11 @@ class ManufacturingCleanup:
         if prior and prior.get("completed"):
             return prior["result"]
         if generation != self.repo.control["generation"]:
-            raise Problem("BuildTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
+            raise Problem("ProductTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
         if not prior:
             control = self.repo.workspace.get().to_dict()
             if control.get("pendingRecordCleanup"):
-                raise Problem("Resume the existing BuildTrackr cleanup first.", 409, "cleanup_pending")
+                raise Problem("Resume the existing ProductTrackr cleanup first.", 409, "cleanup_pending")
             references = [self.repo.ref("manufacturingRecords", key) for key in selections]
             current = {row.id: row.to_dict() for row in self.repo.client.get_all(references)}
             self._validate(current, selections)
@@ -147,9 +147,9 @@ class ManufacturingCleanup:
                 control["generation"] != generation
                 or control["activeDataset"] != self.repo.control["activeDataset"]
             ):
-                raise Problem("BuildTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
+                raise Problem("ProductTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
             if control.get("pendingRecordCleanup") not in (None, body.writeId):
-                raise Problem("Resume the existing BuildTrackr cleanup first.", 409, "cleanup_pending")
+                raise Problem("Resume the existing ProductTrackr cleanup first.", 409, "cleanup_pending")
             maintenance = control.get("maintenance")
             if maintenance and maintenance.get("expires", float("inf")) > time.time():
                 raise Problem("Storage maintenance is in progress. Retry shortly.", 503, "maintenance")
@@ -323,8 +323,8 @@ def manufacturing_cleanup_router(repository, settings):
     @router.post("")
     def remove(body: CleanupWrite, request: Request):
         cleanup = service()
-        if request.headers.get("x-buildtrackr-workspace") != cleanup.repo.workspace.id:
-            raise Problem("BuildTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
-        return cleanup.delete(body, request.state.actor, request.headers.get("x-buildtrackr-generation"))
+        if request.headers.get("x-producttrackr-workspace") != cleanup.repo.workspace.id:
+            raise Problem("ProductTrackr changed. Reload before deleting jobs.", 409, "workspace_changed")
+        return cleanup.delete(body, request.state.actor, request.headers.get("x-producttrackr-generation"))
 
     return router

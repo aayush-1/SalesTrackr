@@ -105,8 +105,8 @@ def test_confirmation_identity_stale_selection_and_permission_are_enforced(proce
     body = request(current)
     remove(client, {**body, "confirmation": ""}, 422)
     remove(client, {**body, "records": body["records"] * 2}, 422)
-    remove(client, body, 409, {**headers(client), "X-BuildTrackr-Generation": uuid4().hex})
-    remove(client, body, 409, {**headers(client), "X-BuildTrackr-Workspace": uuid4().hex})
+    remove(client, body, 409, {**headers(client), "X-ProductTrackr-Generation": uuid4().hex})
+    remove(client, body, 409, {**headers(client), "X-ProductTrackr-Workspace": uuid4().hex})
     with patch.object(ManufacturingBackupManager, "admin", return_value=False):
         assert client.get(PATH).json()["canDelete"] is False
         remove(client, body, 403)

@@ -30,7 +30,7 @@ class Partner(Model):
     @model_validator(mode="after")
     def internal_company(self):
         if self.type == "individual" and self.relationship == "internal":
-            raise ValueError("Use an internal company partner and its contact for in-house work.")
+            raise ValueError("Use an internal company supplier and its contact for in-house work.")
         return self
 
 

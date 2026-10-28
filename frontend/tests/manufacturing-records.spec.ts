@@ -6,7 +6,7 @@ const identifier = () => crypto.randomUUID().replaceAll('-', '');
 async function write(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null, id = identifier(), method = 'POST') {
   const meta = await (await request.get('/api/manufacturing/meta')).json() as ManufacturingMeta;
   const response = await request.fetch(`/api/manufacturing${path}`, {
-    method, headers: { 'X-SalesTrackr-Request': '1', 'X-BuildTrackr-Workspace': meta.workspaceId, 'X-BuildTrackr-Generation': meta.generation },
+    method, headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation },
     data: { writeId: identifier(), id, baseVersion, data },
   });
   expect(response.ok(), await response.text()).toBe(true);
@@ -48,11 +48,60 @@ async function action(page: Page, title: string, fill: () => Promise<void> = asy
 }
 async function assign(page: Page, partnerId: string, contactId?: string) {
   await action(page, 'Assign & start', async () => {
-    await page.getByLabel('Responsible partner', { exact: true }).selectOption(partnerId);
+    await page.getByLabel('Responsible supplier', { exact: true }).selectOption(partnerId);
     if (contactId) await page.getByLabel('Company contact (optional)', { exact: true }).selectOption(contactId);
   });
   await expect(page.locator('.bt-current-work .bt-record-status')).toHaveText('In progress');
 }
+
+test('supplier work sheet shows one supplier entry and opens its current manufacturing jobs', async ({ page, request }) => {
+  const source = await process(request, 'SupplierSheet');
+  const id = await job(request, source.productId);
+  const waiting = await job(request, source.productId);
+  await page.goto(`/manufacturing/records/${id}`);
+  await assign(page, source.companyId, source.contactId);
+  const otherProduct = await write(request, '/products', { name: 'SupplierSheet Housing', reference: 'SupplierSheet-043' });
+  const operationId = (await source.getProduct()).steps[0].operationId;
+  const stepId = await write(request, `/products/${otherProduct}/steps`, { operationId }, 1);
+  await write(request, `/steps/${stepId}/assignments`, { partnerId: source.companyId, contactId: source.contactId }, 1);
+  const otherId = await job(request, otherProduct);
+  const other = (await detail(request, otherId)).record;
+  await write(request, `/records/${otherId}/assign`, {
+    stepId: other.operations[0].id, partnerId: source.companyId, contactId: source.contactId,
+  }, other.version, otherId);
+  await page.goto('/manufacturing');
+  const sheet = page.getByRole('region', { name: 'Supplier work in progress', exact: true });
+  await expect(sheet).toContainText('SupplierSheet Company');
+  const supplierRow = sheet.locator('tbody tr').filter({ hasText: 'SupplierSheet Company' });
+  await expect(supplierRow).toHaveCount(1);
+  await expect(supplierRow.getByRole('cell', { name: '2', exact: true })).toHaveCount(2);
+  await page.getByRole('navigation', { name: 'Manufacturing navigation' }).getByRole('link', { name: 'Supplier work', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Supplier work', exact: true })).toBeVisible();
+  await page.getByLabel('Search supplier work').fill('SupplierSheet');
+  await expect(sheet.locator('tbody tr')).toHaveCount(1);
+  await sheet.getByRole('link', { name: 'SupplierSheet Company', exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`supplier=${source.companyId}`));
+  const works = page.getByRole('region', { name: 'Supplier manufacturing work', exact: true });
+  await expect(works.locator('tbody tr')).toHaveCount(2);
+  await expect(works).toContainText('SupplierSheet Contact');
+  await expect(works).toContainText('SupplierSheet Raw material');
+  await expect(works).toContainText('SupplierSheet-042');
+  await expect(works).toContainText('SupplierSheet-043');
+  await expect(works.getByRole('link', { name: (await detail(request, waiting)).record.number, exact: true })).toHaveCount(0);
+  for (const width of [320, 390, 768, 1024]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  const current = (await detail(request, id)).record;
+  await write(request, `/records/${id}/complete`, { stepId: current.operations[0].id }, current.version, id);
+  const currentOther = (await detail(request, otherId)).record;
+  await write(request, `/records/${otherId}/complete`, { stepId: currentOther.operations[0].id }, currentOther.version, otherId);
+  await page.getByRole('button', { name: 'Refresh supplier work', exact: true }).click();
+  await expect(page.getByText('No current manufacturing work', { exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'All suppliers in progress', exact: true }).click();
+  await page.getByLabel('Search supplier work').fill('SupplierSheet');
+  await expect(page.getByText('No supplier work matches', { exact: true })).toBeVisible();
+});
 
 test('independent jobs run sequentially from product creation through completed work', async ({ page, request }) => {
   const errors: string[] = [], sales: string[] = [];
@@ -77,7 +126,7 @@ test('independent jobs run sequentially from product creation through completed 
   await action(page, 'Complete operation');
   await expect(page.locator('.bt-current-work')).toContainText('Sequential Laser cutting');
   await expect(page.locator('.bt-current-work .bt-record-status')).toHaveText('Awaiting assignment');
-  await expect(page.locator('.bt-current-work')).toContainText('No partner has started');
+  await expect(page.locator('.bt-current-work')).toContainText('No supplier has started');
   await assign(page, source.personId);
   for (const width of [320, 390, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 960 });
@@ -115,8 +164,8 @@ test('reassignment, safe correction and reasoned cancellation retain history', a
   const id = await job(request, source.productId);
   await page.goto(`/manufacturing/records/${id}`);
   await assign(page, source.companyId);
-  await action(page, 'Reassign partner', async () => {
-    await page.getByLabel('Responsible partner', { exact: true }).selectOption(source.personId);
+  await action(page, 'Reassign supplier', async () => {
+    await page.getByLabel('Responsible supplier', { exact: true }).selectOption(source.personId);
     await page.getByLabel('Reason', { exact: true }).fill('Move to specialist');
   });
   await expect(page.locator('.bt-current-work')).toContainText('Corrections Specialist');
@@ -140,18 +189,18 @@ test('reassignment, safe correction and reasoned cancellation retain history', a
   await expect(page.locator('.bt-record-status.cancelled').first()).toBeVisible();
 });
 
-test('a ready job gains live partners and rejects a removed link from an open dropdown', async ({ page, request }) => {
+test('a ready job gains live suppliers and rejects a removed link from an open dropdown', async ({ page, request }) => {
   const source = await process(request, 'LiveLinks', false);
   const id = await job(request, source.productId);
   await page.goto(`/manufacturing/records/${id}`);
   await expect(page.getByRole('button', { name: 'Assign & start', exact: true })).toBeDisabled();
-  await expect(page.locator('.bt-current-work')).toContainText('No partners are linked');
+  await expect(page.locator('.bt-current-work')).toContainText('No suppliers are linked');
   let sourceStep = (await source.getProduct()).steps[0];
   const linkId = await write(request, `/steps/${sourceStep.id}/assignments`, { partnerId: source.companyId }, sourceStep.version);
   await page.getByRole('button', { name: 'Refresh manufacturing record', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Assign & start', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Assign & start', exact: true }).click();
-  await page.getByLabel('Responsible partner', { exact: true }).selectOption(source.companyId);
+  await page.getByLabel('Responsible supplier', { exact: true }).selectOption(source.companyId);
   sourceStep = (await source.getProduct()).steps[0];
   await write(request, `/steps/${sourceStep.id}/assignments/${linkId}/remove`, {}, sourceStep.version, linkId);
   const dialog = page.getByRole('dialog');

@@ -83,7 +83,7 @@ export function ManufacturingCleanup() {
         throw new ManufacturingError('Cleanup response is unconfirmed. Retry the same cleanup.', 503);
       }
       attempt.current = null; remember(); setSelected(new Set()); setDialog(false); setConfirmation(''); setPage(0);
-      setNotice(`Deleted ${result.deletedCount} completed job(s), ${result.activityEventsRemoved} activity event(s) and ${result.writeReceiptsRemoved} action receipt(s). A verified recovery backup was saved. Products, partners, active jobs and numbering were kept.`);
+      setNotice(`Deleted ${result.deletedCount} completed job(s), ${result.activityEventsRemoved} activity event(s) and ${result.writeReceiptsRemoved} action receipt(s). A verified recovery backup was saved. Products, suppliers, active jobs and numbering were kept.`);
       refresh();
     } catch (reason) {
       setError(message(reason));
@@ -101,13 +101,13 @@ export function ManufacturingCleanup() {
     } finally { inFlight.current = false; setBusy(false); }
   };
   return <div className="backup-settings">
-    <Alert tone="warning">Local BuildTrackr storage only. SalesTrackr is not changed. Safety backups use your configured backup storage and ten-copy retention.</Alert>
+    <Alert tone="warning">Local ProductTrackr storage only. SalesTrackr is not changed. Safety backups use your configured backup storage and ten-copy retention.</Alert>
     <section className="panel details-panel settings-section" aria-label="Completed manufacturing record cleanup">
       <h2><Trash2 size={19} />Completed record cleanup</h2>
       <p>Choose completed manufacturing jobs you no longer need. Awaiting-assignment, in-progress and cancelled jobs are protected. Nothing is deleted automatically.</p>
-      <p>This frees database storage, not the application's RAM limit. Selected jobs, their copied operation routes, activity history and action receipts are removed. Products, process links, partners, contacts and the numbering counter stay unchanged.</p>
+      <p>This frees database storage, not the application's RAM limit. Selected jobs, their copied operation routes, activity history and action receipts are removed. Products, process links, suppliers, contacts and the numbering counter stay unchanged.</p>
       <p className="help-text">One small anti-replay marker is retained per deleted job, so an old retry cannot recreate it. A full workspace backup is created and verified before deletion. Backups may still contain deleted jobs until the normal ten-backup rotation removes older copies.</p>
-      <Alert tone="warning">Permanent deletion has no per-job undo. Recovering a deleted job requires a full workspace backup restore, which also rolls back other BuildTrackr changes.</Alert>
+      <Alert tone="warning">Permanent deletion has no per-job undo. Recovering a deleted job requires a full workspace backup restore, which also rolls back other ProductTrackr changes.</Alert>
       {(error || resource.error) && <Alert>{error || resource.error}</Alert>}
       {notice && <Alert tone="success">{notice}</Alert>}
       {data?.lastError && !error && <Alert tone="warning">{data.lastError}</Alert>}
@@ -138,7 +138,7 @@ export function ManufacturingCleanup() {
             disabled={locked || resource.loading || !data.canDelete || data.cleanupInProgress}
             onChange={event => setSelected(old => { const next = new Set(old); if (event.target.checked) next.add(row.id); else next.delete(row.id); return next; })} /></td>
           <td><Link className="record-title" to={`/manufacturing/records/${row.id}`}>{row.number}</Link></td>
-          <td><strong>{row.productName}</strong><span className="cell-sub">{row.productReference || 'No Product ID'}</span></td>
+          <td><strong>{row.productName}</strong><span className="cell-sub">{row.productReference || 'No part number'}</span></td>
           <td>{row.completedCount} / {row.stepCount} operations</td><td>{formatDate(row.completedOn)}</td>
         </tr>)}</tbody>
       </table></div> : !resource.loading && data && <Empty title="Nothing to clean up" text="Completed manufacturing jobs will appear here. Active and cancelled jobs stay protected." />}
@@ -149,7 +149,7 @@ export function ManufacturingCleanup() {
     </section>
     {dialog && <Modal title="Permanently delete manufacturing records?" onClose={() => { if (!busy) setDialog(false); }}>
       <p>This permanently removes {attempt.current?.request.records.length || dialogRecords.length} selected completed job(s), their operation snapshots, activity history and action receipts.</p>
-      <p>A complete backup must be verified first. Products, operations, partners, contacts, process links, active jobs and numbering are not deleted. One small anti-replay marker remains per deleted job.</p>
+      <p>A complete backup must be verified first. Products, operations, suppliers, contacts, process links, active jobs and numbering are not deleted. One small anti-replay marker remains per deleted job.</p>
       <Field label="Type DELETE to confirm permanent deletion"><input autoComplete="off" value={confirmation} disabled={busy || unconfirmed} onChange={event => setConfirmation(event.target.value)} /></Field>
       {error && <Alert>{error}</Alert>}
       {busy && <div className="backup-progress" role="status"><LoaderCircle className="spin" size={18} />Verifying a safety backup and deleting selected jobs. Keep this page open.</div>}

@@ -33,8 +33,8 @@ def headers(client):
     meta = client.get("/api/manufacturing/meta").json()
     return {
         "X-SalesTrackr-Request": "1",
-        "X-BuildTrackr-Workspace": meta["workspaceId"],
-        "X-BuildTrackr-Generation": meta["generation"],
+        "X-ProductTrackr-Workspace": meta["workspaceId"],
+        "X-ProductTrackr-Generation": meta["generation"],
     }
 
 
@@ -89,7 +89,7 @@ def test_archive_includes_unlinked_masters_all_links_jobs_history_counters_and_r
     assert backup(client, operation_id)["id"] == row["id"]
     downloaded = client.get(f"/api/manufacturing/backups/{row['id']}/download")
     assert downloaded.status_code == 200
-    assert "BuildTrackr-" in downloaded.headers["content-disposition"]
+    assert "ProductTrackr-" in downloaded.headers["content-disposition"]
     content, manifest = read_archive(downloaded.content)
     assert content == expected
     assert manifest["counts"] == row["counts"] == checked_data(expected)
@@ -122,7 +122,7 @@ def test_full_restore_is_atomic_fences_old_forms_preserves_sales_and_retries_onc
     write_id = uuid4().hex
     result = restore(client, row, preview, write_id)
     assert result["restored"] is True
-    assert result["generation"] != old_headers["X-BuildTrackr-Generation"]
+    assert result["generation"] != old_headers["X-ProductTrackr-Generation"]
     restored_repo = ManufacturingRepository(settings)
     restored, _ = restored_repo.snapshot()
     assert restored == original
@@ -337,44 +337,47 @@ def test_sales_archives_and_unexpected_collections_are_never_silently_accepted(p
     assert repo.workspace.get().to_dict()["activeDataset"] == "legacy"
 
 
-def test_drive_folder_is_private_separate_and_only_buildtrackr_files_are_managed():
+def test_drive_folder_is_private_separate_and_only_producttrackr_files_are_managed():
     base = mock_drive_store(b"archive")
     store = object.__new__(ManufacturingDriveBackupStore)
     store.backend, store.folder_id, store.folder_url = base.backend, base.folder_id, None
     store.sales_folders = {"salestrackr-root-folder", "salestrackr-backup-folder"}
     base.folder_metadata.update(parents=["independent-parent"], appProperties={})
     files = store.backend._api.return_value.files.return_value
-    files.get.return_value.execute.return_value["appProperties"] = {"app": "buildtrackr-backup"}
-    assert store._folder() == base.folder_id
+    files.get.return_value.execute.return_value["appProperties"] = {"app": "producttrackr-backup"}
+    base.folder_metadata["name"] = "ProductTrackr"
+    assert store._root_folder() == base.folder_id
+    files.update.assert_not_called()
     base.folder_metadata["appProperties"] = {"app": "salestrackr-firestore-backups"}
     with pytest.raises(Problem, match="separate"):
-        store._folder()
+        store._root_folder()
     base.folder_metadata["appProperties"] = {}
     base.folder_metadata["parents"] = ["salestrackr-root-folder"]
     with pytest.raises(Problem, match="separate"):
-        store._folder()
+        store._root_folder()
     base.folder_metadata["parents"] = ["independent-parent"]
     permissions = store.backend._api.return_value.permissions.return_value
     permissions.list.return_value.execute.return_value = {"permissions": [{"type": "anyone"}]}
     with pytest.raises(Problem, match="private"):
-        store._folder()
+        store._root_folder()
     permissions.list.return_value.execute.return_value = {"permissions": [{"type": "user"}]}
+    store._folder = lambda: base.folder_id
     store.backend._list.return_value = []
     assert store.inventory() == []
-    assert "buildtrackr-backup" in store.backend._list.call_args.args[0]
+    assert "producttrackr-backup" in store.backend._list.call_args.args[0]
     files.get.return_value.execute.side_effect = Problem("Missing", 503, "drive_missing")
-    store.put("new-buildtrackr-backup", b"archive", "BuildTrackr.zip")
-    assert files.create.call_args.kwargs["body"]["appProperties"] == {"app": "buildtrackr-backup"}
+    store.put("new-producttrackr-backup", b"archive", "ProductTrackr.zip")
+    assert files.create.call_args.kwargs["body"]["appProperties"] == {"app": "producttrackr-backup"}
     assert files.create.call_args.kwargs["body"]["parents"] == [store.folder_id]
 
 
 def test_local_storage_never_connects_to_drive_and_drive_errors_do_not_fall_back(app):
     _, settings = app
-    configured = replace(settings, manufacturing_backup_folder_id="dedicated-buildtrackr-folder")
+    configured = replace(settings, manufacturing_backup_folder_id="dedicated-producttrackr-folder")
     with patch("backend.app.manufacturing_backups.DriveBackend") as drive:
         manager = ManufacturingBackupManager(ManufacturingRepository(configured), configured)
         assert isinstance(manager.store, LocalBackupStore)
-        assert "dedicated-buildtrackr-folder" in manager.status("local-demo")["configuredFolderUrl"]
+        assert "dedicated-producttrackr-folder" in manager.status("local-demo")["configuredFolderUrl"]
         drive.assert_not_called()
     with pytest.raises(Problem, match="reconnect"):
         ManufacturingBackupManager(
@@ -384,6 +387,24 @@ def test_local_storage_never_connects_to_drive_and_drive_errors_do_not_fall_back
                 manufacturing_backup_storage="drive",
             ),
         )
+
+
+def test_separate_producttrackr_credential_does_not_replace_sales_authorization(app):
+    _, settings = app
+    scopes = ["https://www.googleapis.com/auth/drive"]
+    token = json.dumps({"scopes": scopes, "refresh_token": "synthetic"})
+    configured = replace(
+        settings,
+        token_json="sales-credential",
+        manufacturing_token_json=token,
+        manufacturing_backup_folder_id="dedicated-producttrackr-root",
+    )
+    with patch("backend.app.manufacturing_backups.DriveBackend") as drive:
+        ManufacturingDriveBackupStore(configured)
+        drive.assert_called_once_with(
+            token, "dedicated-producttrackr-root", operator=True, scopes=scopes,
+        )
+    assert configured.token_json == "sales-credential"
 
 
 def test_uploaded_restore_retries_with_old_identity_without_repeating_recovery(process):
@@ -397,9 +418,9 @@ def test_uploaded_restore_retries_with_old_identity_without_repeating_recovery(p
     assert preview.status_code == 200, preview.text
     restore_headers = {
         **upload_headers,
-        "X-BuildTrackr-Restore-Token": preview.json()["token"],
-        "X-BuildTrackr-Restore-Confirm": "RESTORE",
-        "X-BuildTrackr-Write-Id": uuid4().hex,
+        "X-ProductTrackr-Restore-Token": preview.json()["token"],
+        "X-ProductTrackr-Restore-Confirm": "RESTORE",
+        "X-ProductTrackr-Write-Id": uuid4().hex,
     }
     first = client.post("/api/manufacturing/backups/restore", content=content, headers=restore_headers)
     assert first.status_code == 200, first.text

@@ -1,8 +1,6 @@
-import os
 import secrets
 from copy import copy
 from threading import RLock
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from google.api_core.exceptions import AlreadyExists
@@ -26,22 +24,14 @@ def deleted_record_receipt(record_id):
 
 
 class ManufacturingRepository:
-    """Independent local manufacturing data; never a sales repository or cloud fallback."""
+    """Independent manufacturing data, with explicit emulator or production configuration."""
 
-    def __init__(self, settings):
-        emulator = os.getenv("FIRESTORE_EMULATOR_HOST", "")
-        if (
-            settings.mode != "demo"
-            or os.getenv("K_SERVICE")
-            or not settings.manufacturing_project.startswith("demo-")
-            or urlsplit(f"http://{emulator}").hostname not in ("127.0.0.1", "localhost", "::1")
-            or settings.manufacturing_workspace == settings.firestore_workspace
-        ):
-            raise RuntimeError(
-                "BuildTrackr requires an isolated demo workspace and localhost Firestore emulator."
-            )
-        self.client = firestore.Client(
-            project=settings.manufacturing_project, credentials=AnonymousCredentials(),
+    def __init__(self, settings, client=None):
+        settings.validate_manufacturing()
+        self.mode = settings.mode
+        self.client = client or firestore.Client(
+            project=settings.manufacturing_project, database=settings.manufacturing_database,
+            credentials=AnonymousCredentials() if settings.mode == "demo" else None,
         )
         self.workspace = self.client.collection("workspaces").document(settings.manufacturing_workspace)
         self.lock = RLock()
@@ -145,11 +135,12 @@ class ManufacturingRepository:
         control = self.workspace.get().to_dict()
         if control["generation"] != self.control["generation"]:
             raise Problem(
-                "BuildTrackr was restored. Reload the workspace before continuing.", 409, "workspace_changed",
+                "ProductTrackr was restored. Reload the workspace before continuing.",
+                409, "workspace_changed",
             )
         return {
             "workspaceId": self.workspace.id, "generation": control["generation"],
-            "mode": "demo", "storageBackend": "firestore",
+            "mode": self.mode, "storageBackend": "firestore",
         }
 
     def export_at(self, target, preferences):
@@ -160,7 +151,7 @@ class ManufacturingRepository:
         allowed = set(FILES) | (RESERVED if target.path == self.workspace.path else set())
         if any(collection.id not in allowed for collection in target.collections()):
             raise Problem(
-                "An unknown BuildTrackr collection cannot be omitted from a backup.", 409, "backup_schema",
+                "An unknown ProductTrackr collection cannot be omitted from a backup.", 409, "backup_schema",
             )
         data, size = {"settings": preferences}, 0
         for kind in FILES:
@@ -169,7 +160,7 @@ class ManufacturingRepository:
                 value = snapshot.to_dict()
                 size += len(encode(value)) + len(snapshot.id)
                 if size > MAX_EXPANDED:
-                    raise Problem("BuildTrackr data exceeds the 256 MiB backup limit.", 413, "backup_size")
+                    raise Problem("ProductTrackr data exceeds the 256 MiB backup limit.", 413, "backup_size")
                 data[kind][snapshot.id] = value
         return data
 
@@ -179,16 +170,19 @@ class ManufacturingRepository:
         for _ in range(3):
             before = self.workspace.get().to_dict()
             if before.get("pendingRecordCleanup"):
-                raise Problem("Resume BuildTrackr record cleanup before backing up.", 503, "cleanup_pending")
+                raise Problem(
+                    "Resume ProductTrackr record cleanup before backing up.", 503, "cleanup_pending",
+                )
             if before["generation"] != self.control["generation"]:
-                raise Problem("BuildTrackr changed. Reload before backing up.", 409, "workspace_changed")
+                raise Problem("ProductTrackr changed. Reload before backing up.", 409, "workspace_changed")
             data = self.export_at(self.dataset, {"weeklyEnabled": before.get("weeklyEnabled", True)})
             after = self.workspace.get().to_dict()
             if all(before[key] == after[key] for key in ("generation", "sequence")):
                 checked_data(data)
                 return data, before
         raise Problem(
-            "BuildTrackr changed while taking its snapshot. Retry the same backup.", 409, "snapshot_changed",
+            "ProductTrackr changed while taking its snapshot. Retry the same backup.",
+            409, "snapshot_changed",
         )
 
     def stage(self, data):
@@ -213,7 +207,8 @@ class ManufacturingRepository:
         checked_data(actual)
         if actual != data:
             raise Problem(
-                "Staged BuildTrackr verification failed. Live data was not replaced.", 503, "restore_verify",
+                "Staged ProductTrackr verification failed. Live data was not replaced.",
+                503, "restore_verify",
             )
         target.update({"state": "verified", "dataHash": digest(actual)})
         return target, {
@@ -295,7 +290,7 @@ class ManufacturingRepository:
             if before == after:
                 return {
                     **result, "workspaceId": self.workspace.id, "generation": before["generation"],
-                    "mode": "demo", "storageBackend": "firestore",
+                    "mode": self.mode, "storageBackend": "firestore",
                 }
         raise Problem("Manufacturing data changed while loading. Please refresh.", 409, "read_changed")
 
@@ -311,13 +306,14 @@ class ManufacturingRepository:
                 workspace != self.workspace.id or generation != control["generation"]
                 or self.control["generation"] != control["generation"]
             ):
-                raise Problem("BuildTrackr changed. Reload before saving.", 409, "workspace_changed")
+                raise Problem("ProductTrackr changed. Reload before saving.", 409, "workspace_changed")
             if control.get("maintenance"):
                 raise Problem(
-                    "BuildTrackr recovery is in progress. Retry the same change shortly.", 503, "maintenance",
+                    "ProductTrackr recovery is in progress. Retry the same change shortly.",
+                    503, "maintenance",
                 )
             if control.get("pendingRecordCleanup"):
-                raise Problem("Resume BuildTrackr record cleanup before saving.", 503, "cleanup_pending")
+                raise Problem("Resume ProductTrackr record cleanup before saving.", 503, "cleanup_pending")
             if action.startswith("record:"):
                 marker = self.ref("writes", deleted_record_receipt(body.id)).get(
                     transaction=transaction,
@@ -373,11 +369,11 @@ class ManufacturingRepository:
                 raise Problem("Manufacturing record not found.", 404, "not_found")
             self.check(old, body.baseVersion)
             if kind == "partners" and old and old["type"] != fields["type"]:
-                raise Problem("Partner type cannot change; its company contacts must stay valid.")
+                raise Problem("Supplier type cannot change; its company contacts must stay valid.")
             if kind == "contacts":
                 partner = self.read("partners", fields["partnerId"], tx)
                 if partner["type"] != "company":
-                    raise Problem("Contacts belong to company partners, not independent people.")
+                    raise Problem("Contacts belong to company suppliers, not independent people.")
                 if old and old["partnerId"] != fields["partnerId"]:
                     raise Problem("Moving a contact between companies is not supported.")
             if kind == "products" and not old:
@@ -424,22 +420,24 @@ class ManufacturingRepository:
             if fields["contactId"]:
                 contact = self.read("contacts", fields["contactId"], tx)
                 if partner["type"] != "company" or contact["partnerId"] != partner["id"]:
-                    raise Problem("Choose a contact belonging to this company partner.")
+                    raise Problem("Choose a contact belonging to this company supplier.")
             old = by_id.get(body.id)
             if action == "edit-assignment" and not old:
                 raise Problem("Assignment not found.", 404, "not_found")
             if action == "assign" and self.ref("assignments", body.id).get(transaction=tx).exists:
                 raise Problem("Assignment ID is already in use.", 409, "record_exists")
             if old and old["partnerId"] != fields["partnerId"]:
-                raise Problem("Remove the existing assignment before choosing a different partner.")
+                raise Problem("Remove the existing assignment before choosing a different supplier.")
             if any(a["partnerId"] == fields["partnerId"] and a["id"] != body.id for a in assignments):
-                raise Problem("This partner is already assigned to this product operation.", 409, "duplicate")
+                raise Problem(
+                    "This supplier is already assigned to this product operation.", 409, "duplicate",
+                )
             put("assignments", old, {**fields, "stepId": target, "productId": step["productId"]}, body.id)
             primary = primary or body.id
         elif action == "primary":
             primary = Primary.model_validate(body.data).assignmentId
             if primary not in by_id:
-                raise Problem("The primary partner must be assigned to this product operation.")
+                raise Problem("The primary supplier must be assigned to this product operation.")
         elif action == "remove":
             removal = RemoveAssignment.model_validate(body.data)
             if body.id not in by_id:
@@ -447,12 +445,12 @@ class ManufacturingRepository:
             remaining = set(by_id) - {body.id}
             if primary == body.id:
                 if not remaining and removal.replacementId:
-                    raise Problem("The last assignment does not need a replacement primary partner.")
+                    raise Problem("The last assignment does not need a replacement primary supplier.")
                 primary = removal.replacementId if remaining else None
                 if remaining and primary not in remaining:
-                    raise Problem("Choose a remaining partner to replace the primary partner.")
+                    raise Problem("Choose a remaining supplier to replace the primary supplier.")
             elif removal.replacementId:
-                raise Problem("A replacement is only needed when removing the primary partner.")
+                raise Problem("A replacement is only needed when removing the primary supplier.")
             deletes.append(self.ref("assignments", body.id))
         else:
             raise Problem("Unknown manufacturing action.", 404, "not_found")

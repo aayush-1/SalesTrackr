@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -21,9 +22,50 @@ class Settings:
     backup_folder_id: str = ""
     manufacturing_enabled: bool = False
     manufacturing_project: str = ""
-    manufacturing_workspace: str = "buildtrackr"
+    manufacturing_workspace: str = "producttrackr"
     manufacturing_backup_folder_id: str = ""
     manufacturing_backup_storage: str = "local"
+    manufacturing_token_json: str = ""
+    manufacturing_database: str = "(default)"
+    manufacturing_admins: tuple[str, ...] = ()
+
+    def manufacturing_identity(self, workspace=None):
+        return {
+            "project": self.manufacturing_project,
+            "database": self.manufacturing_database,
+            "workspace": workspace or self.manufacturing_workspace,
+        }
+
+    def validate_manufacturing(self):
+        emulator = os.getenv("FIRESTORE_EMULATOR_HOST", "")
+        if self.manufacturing_workspace == self.firestore_workspace:
+            raise RuntimeError("ProductTrackr must use a separate workspace from SalesTrackr.")
+        if self.mode == "demo":
+            if (
+                os.getenv("K_SERVICE")
+                or not self.manufacturing_project.startswith("demo-")
+                or not emulator
+                or urlsplit(f"http://{emulator}").hostname not in ("localhost", "127.0.0.1", "::1")
+            ):
+                raise RuntimeError("Local ProductTrackr requires a demo- project and localhost emulator.")
+            return
+        if self.mode != "production" or emulator or self.manufacturing_project.startswith("demo-"):
+            raise RuntimeError("Production ProductTrackr cannot use demo projects or the Firestore emulator.")
+        if not self.manufacturing_project or not self.manufacturing_database:
+            raise RuntimeError("Production ProductTrackr requires a Firestore project and database.")
+        if self.manufacturing_backup_storage != "drive":
+            raise RuntimeError("Production ProductTrackr requires Drive backups; local storage is forbidden.")
+        if (
+            not self.manufacturing_backup_folder_id
+            or self.manufacturing_backup_folder_id in (self.root_id, self.backup_folder_id)
+        ):
+            raise RuntimeError(
+                "Production ProductTrackr requires its own Drive root, separate from SalesTrackr."
+            )
+        if not self.manufacturing_token_json:
+            raise RuntimeError("Production ProductTrackr requires PRODUCTTRACKR_DRIVE_TOKEN_JSON.")
+        if not (self.manufacturing_admins or self.recovery_admins):
+            raise RuntimeError("Production ProductTrackr requires PRODUCTTRACKR_ADMIN_EMAILS.")
 
     @classmethod
     def load(cls):
@@ -51,23 +93,26 @@ class Settings:
             ),
             backup_schedule_ready=os.getenv("BACKUP_SCHEDULE_READY", "").lower() == "true",
             backup_folder_id=os.getenv("BACKUP_DRIVE_FOLDER_ID", ""),
-            manufacturing_enabled=os.getenv("BUILDTRACKR_ENABLED", "").lower() == "true",
-            manufacturing_project=os.getenv("BUILDTRACKR_FIRESTORE_PROJECT_ID", ""),
-            manufacturing_workspace=os.getenv("BUILDTRACKR_WORKSPACE_ID", "buildtrackr"),
-            manufacturing_backup_folder_id=os.getenv("BUILDTRACKR_BACKUP_DRIVE_FOLDER_ID", ""),
-            manufacturing_backup_storage=os.getenv("BUILDTRACKR_BACKUP_STORAGE", "local"),
+            manufacturing_enabled=os.getenv("PRODUCTTRACKR_ENABLED", "").lower() == "true",
+            manufacturing_project=os.getenv("PRODUCTTRACKR_FIRESTORE_PROJECT_ID", ""),
+            manufacturing_workspace=os.getenv("PRODUCTTRACKR_WORKSPACE_ID", "producttrackr"),
+            manufacturing_backup_folder_id=os.getenv("PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID", ""),
+            manufacturing_backup_storage=os.getenv("PRODUCTTRACKR_BACKUP_STORAGE", "local"),
+            manufacturing_token_json=os.getenv("PRODUCTTRACKR_DRIVE_TOKEN_JSON", ""),
+            manufacturing_database=os.getenv("PRODUCTTRACKR_FIRESTORE_DATABASE_ID", "(default)"),
+            manufacturing_admins=tuple(
+                email.strip().casefold()
+                for email in os.getenv("PRODUCTTRACKR_ADMIN_EMAILS", "").split(",")
+                if email.strip()
+            ),
         )
-        if settings.manufacturing_enabled and mode != "demo":
-            raise RuntimeError(
-                "BuildTrackr production enablement requires a separate reviewed cutover."
-            )
+        if settings.manufacturing_enabled:
+            settings.validate_manufacturing()
         if settings.manufacturing_backup_storage not in ("local", "drive"):
-            raise RuntimeError("BUILDTRACKR_BACKUP_STORAGE must be local or drive.")
+            raise RuntimeError("PRODUCTTRACKR_BACKUP_STORAGE must be local or drive.")
         if settings.storage_backend not in ("drive", "firestore"):
             raise RuntimeError("STORAGE_BACKEND must be drive or firestore.")
         if settings.storage_backend == "firestore":
-            from urllib.parse import urlsplit
-
             emulator = os.getenv("FIRESTORE_EMULATOR_HOST", "")
             if not settings.firestore_project:
                 raise RuntimeError("Firestore requires FIRESTORE_PROJECT_ID.")

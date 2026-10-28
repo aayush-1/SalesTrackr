@@ -180,7 +180,7 @@ class ManufacturingRecords:
         source = self.repo.ref("steps", current["sourceStepId"]).get(transaction=transaction).to_dict()
         if not source:
             raise Problem(
-                "The source Product operation is unavailable; its partner choices cannot be resolved.",
+                "The source Product operation is unavailable; its supplier choices cannot be resolved.",
                 409,
                 "source_unavailable",
             )
@@ -205,7 +205,7 @@ class ManufacturingRecords:
         choice = next((c for c in choices if c["partner"]["id"] == command.partnerId), None)
         if not choice:
             raise Problem(
-                "This partner is not currently linked to the source Product operation. Refresh the choices.",
+                "This supplier is not currently linked to the source Product operation. Refresh the choices.",
                 409,
                 "partner_not_linked",
             )
@@ -214,7 +214,7 @@ class ManufacturingRecords:
         if command.contactId:
             contact = self.repo.read("contacts", command.contactId, transaction)
             if partner["type"] != "company" or contact["partnerId"] != partner["id"]:
-                raise Problem("Choose a contact belonging to this company partner.")
+                raise Problem("Choose a contact belonging to this company supplier.")
             contact = {key: contact[key] for key in ("id", "name", "designation", "email", "phone")}
         return {
             "partnerId": partner["id"],
@@ -345,7 +345,7 @@ class ManufacturingRecords:
                         if assignment["partnerId"] == previous["partnerId"] and (
                             assignment["contact"] or {}
                         ).get("id") == (previous["contact"] or {}).get("id"):
-                            raise Problem("Choose a different partner or contact when reassigning.")
+                            raise Problem("Choose a different supplier or contact when reassigning.")
                         event.update({"previousAssignment": current["assignment"], "reason": data.reason})
                     current.update(
                         {
@@ -491,6 +491,57 @@ class ManufacturingRecords:
             **self.repo.meta(),
         }
 
+    def supplier_work(self, search="", offset=0, limit=50, partner_id=None):
+        term = search.strip().casefold()
+        for _ in range(3):
+            before = self.repo.workspace.get().to_dict()
+            query = self.repo.collection("manufacturingRecords").where(
+                filter=FieldFilter("status", "==", "in_progress"),
+            ).select(SUMMARY_FIELDS)
+            rows = [
+                row for snapshot in query.stream()
+                for row in [snapshot.to_dict()]
+                if row.get("currentPartnerId")
+                and (not partner_id or row["currentPartnerId"] == partner_id)
+            ]
+            rows.sort(key=lambda row: (
+                row["currentPartnerName"].casefold(), row["currentPartnerId"],
+                row["productName"].casefold(), row["number"], row["id"],
+            ))
+            groups = {}
+            for row in rows:
+                supplier = groups.setdefault(row["currentPartnerId"], {
+                    "id": row["currentPartnerId"], "name": row["currentPartnerName"],
+                    "jobCount": 0, "products": set(), "matches": False,
+                })
+                supplier["jobCount"] += 1
+                supplier["products"].add(row["productId"])
+                supplier["matches"] |= not term or any(
+                    term in (row.get(field) or "").casefold() for field in (
+                        "currentPartnerName", "productName", "productReference",
+                        "currentOperationName", "number", "currentContactName",
+                    )
+                )
+            suppliers = [
+                {"id": group["id"], "name": group["name"], "jobCount": group["jobCount"],
+                 "productCount": len(group["products"])}
+                for group in groups.values() if group["matches"]
+            ]
+            if before == self.repo.workspace.get().to_dict():
+                if partner_id:
+                    return {
+                        "items": rows[offset:offset + limit], "total": len(rows),
+                        "supplierName": rows[0]["currentPartnerName"] if rows else None,
+                        **self.repo.meta(),
+                    }
+                return {
+                    "items": suppliers[offset:offset + limit], "total": len(suppliers),
+                    "supplierCount": len(suppliers),
+                    "jobCount": sum(group["jobCount"] for group in suppliers),
+                    **self.repo.meta(),
+                }
+        raise Problem("Supplier work changed while loading. Refresh it.", 409, "read_changed")
+
 
 def manufacturing_records_router(repository):
     router = APIRouter(prefix="/records")
@@ -501,6 +552,14 @@ def manufacturing_records_router(repository):
     @router.get("/summary")
     def summary():
         return service().summary()
+
+    @router.get("/supplier-work")
+    def supplier_work(
+        search: str = Query("", max_length=200),
+        offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+        partnerId: Identifier | None = None,
+    ):
+        return service().supplier_work(search, offset, limit, partnerId)
 
     @router.get("/preview/{product_id}")
     def preview(product_id: Identifier):
@@ -524,8 +583,8 @@ def manufacturing_records_router(repository):
             body.id,
             body,
             request.state.actor,
-            request.headers.get("x-buildtrackr-workspace"),
-            request.headers.get("x-buildtrackr-generation"),
+            request.headers.get("x-producttrackr-workspace"),
+            request.headers.get("x-producttrackr-generation"),
         )
 
     @router.post("")

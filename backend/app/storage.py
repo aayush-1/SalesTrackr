@@ -234,11 +234,11 @@ class LocalBackend:
 
 
 class DriveBackend:
-    def __init__(self, token_json: str, root_id: str, *, operator=False):
+    def __init__(self, token_json: str, root_id: str, *, operator=False, scopes=None):
         info = json.loads(token_json)
         if not info.get("refresh_token"):
             raise RuntimeError("Drive credential must contain a refresh token.")
-        self.credentials = Credentials.from_authorized_user_info(info, SCOPES)
+        self.credentials = Credentials.from_authorized_user_info(info, scopes or SCOPES)
         self.root_id = root_id
         self.folders = None
         self.service = None

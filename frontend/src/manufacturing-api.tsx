@@ -7,7 +7,7 @@ export const ManufacturingContext = createContext<{
 } | null>(null);
 export function useManufacturing() {
   const value = useContext(ManufacturingContext);
-  if (!value) throw new Error('BuildTrackr identity is unavailable.');
+  if (!value) throw new Error('ProductTrackr identity is unavailable.');
   return value;
 }
 export class ManufacturingError extends Error {
@@ -18,8 +18,8 @@ export async function manufacturingApi<T>(path: string, options: RequestInit = {
   if (!headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   headers.set('X-SalesTrackr-Request', '1');
   if (meta) {
-    headers.set('X-BuildTrackr-Workspace', meta.workspaceId);
-    headers.set('X-BuildTrackr-Generation', meta.generation);
+    headers.set('X-ProductTrackr-Workspace', meta.workspaceId);
+    headers.set('X-ProductTrackr-Generation', meta.generation);
   }
   try {
     const response = await fetch(`/api/manufacturing${path}`, { ...options, headers });
@@ -36,7 +36,7 @@ function checkIdentity(data: unknown, meta: ManufacturingMeta) {
   const returned = data as Partial<ManufacturingMeta> | null;
   if (returned && ((returned.generation && returned.generation !== meta.generation) ||
       (returned.workspaceId && returned.workspaceId !== meta.workspaceId))) {
-    throw new ManufacturingError('BuildTrackr was restored in another session. Reload before continuing.', 409, 'workspace_changed');
+    throw new ManufacturingError('ProductTrackr was restored in another session. Reload before continuing.', 409, 'workspace_changed');
   }
 }
 export function useManufacturingResource<T>(path: string | null, { keepPreviousData = false }: { keepPreviousData?: boolean } = {}) {
@@ -93,7 +93,7 @@ export function useManufacturingSave({ refreshOnSave = true }: { refreshOnSave?:
     inFlight.current = true; setState(old => ({ ...old, busy: true, error: '' }));
     try {
       if (workspaceChanged || identity.workspaceId !== meta.workspaceId || identity.generation !== meta.generation) {
-        throw new ManufacturingError('BuildTrackr changed. Reload before saving.', 409);
+        throw new ManufacturingError('ProductTrackr changed. Reload before saving.', 409);
       }
       const attempt = ticket.current;
       const result = await manufacturingApi<{ id: string }>(attempt.path, { method: attempt.method, body: JSON.stringify(attempt.body) }, identity);

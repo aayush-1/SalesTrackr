@@ -17,10 +17,10 @@ def manufacturing_recovery_router(repository, settings):
 
     def fence(request, recovery):
         if (
-            request.headers.get("x-buildtrackr-workspace") != recovery.repo.workspace.id
-            or request.headers.get("x-buildtrackr-generation") != recovery.repo.control["generation"]
+            request.headers.get("x-producttrackr-workspace") != recovery.repo.workspace.id
+            or request.headers.get("x-producttrackr-generation") != recovery.repo.control["generation"]
         ):
-            raise Problem("BuildTrackr changed. Reload before starting recovery.", 409, "workspace_changed")
+            raise Problem("ProductTrackr changed. Reload before starting recovery.", 409, "workspace_changed")
 
     @router.get("/settings/backup-recovery")
     def status(request: Request):
@@ -38,7 +38,7 @@ def manufacturing_recovery_router(repository, settings):
         return Response(
             content,
             media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="BuildTrackr-{backup_id}.zip"'},
+            headers={"Content-Disposition": f'attachment; filename="ProductTrackr-{backup_id}.zip"'},
         )
 
     async def input_data(request, recovery):
@@ -51,7 +51,7 @@ def manufacturing_recovery_router(repository, settings):
             return content, row, body
         except (ValueError, AttributeError, TypeError):
             raise Problem(
-                "Select a BuildTrackr backup or upload its ZIP archive.", 422, "invalid_backup"
+                "Select a ProductTrackr backup or upload its ZIP archive.", 422, "invalid_backup"
             ) from None
 
     @router.post("/backups/inspect")
@@ -64,15 +64,15 @@ def manufacturing_recovery_router(repository, settings):
     @router.post("/backups/restore")
     async def restore(request: Request):
         recovery = manager()
-        if request.headers.get("x-buildtrackr-workspace") != recovery.repo.workspace.id:
-            raise Problem("BuildTrackr changed. Reload before starting recovery.", 409, "workspace_changed")
+        if request.headers.get("x-producttrackr-workspace") != recovery.repo.workspace.id:
+            raise Problem("ProductTrackr changed. Reload before starting recovery.", 409, "workspace_changed")
         upload = request.headers.get("content-type", "").split(";")[0] == "application/zip"
         if upload:
             content, _, body = await input_data(request, recovery)
             result = await run_in_threadpool(
                 recovery.completed_upload_restore, content, request.state.actor,
-                request.headers.get("x-buildtrackr-restore-confirm", ""),
-                request.headers.get("x-buildtrackr-write-id"),
+                request.headers.get("x-producttrackr-restore-confirm", ""),
+                request.headers.get("x-producttrackr-write-id"),
             )
             if result:
                 return result
@@ -90,7 +90,7 @@ def manufacturing_recovery_router(repository, settings):
                     return result
             except (ValueError, AttributeError, TypeError):
                 raise Problem(
-                    "Select a BuildTrackr backup before restoring.", 422, "invalid_backup"
+                    "Select a ProductTrackr backup before restoring.", 422, "invalid_backup"
                 ) from None
         fence(request, recovery)
         if not upload:
@@ -99,9 +99,9 @@ def manufacturing_recovery_router(repository, settings):
             recovery.restore,
             content,
             request.state.actor,
-            body.get("previewToken") or request.headers.get("x-buildtrackr-restore-token", ""),
-            body.get("confirmation") or request.headers.get("x-buildtrackr-restore-confirm", ""),
-            body.get("writeId") or request.headers.get("x-buildtrackr-write-id"),
+            body.get("previewToken") or request.headers.get("x-producttrackr-restore-token", ""),
+            body.get("confirmation") or request.headers.get("x-producttrackr-restore-confirm", ""),
+            body.get("writeId") or request.headers.get("x-producttrackr-write-id"),
         )
 
     return router

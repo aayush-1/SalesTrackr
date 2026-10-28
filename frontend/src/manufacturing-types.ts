@@ -1,6 +1,6 @@
 export type Directory = 'products' | 'operations' | 'partners' | 'contacts';
 export interface ManufacturingMeta {
-  workspaceId: string; generation: string; mode: 'demo'; storageBackend: 'firestore';
+  workspaceId: string; generation: string; mode: 'demo' | 'production'; storageBackend: 'firestore';
 }
 export interface ManufacturingEntity {
   id: string; version: number; name: string; createdAt: string; updatedAt: string; updatedBy: string;

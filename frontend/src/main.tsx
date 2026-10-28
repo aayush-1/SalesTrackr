@@ -17,9 +17,10 @@ import {
   ManufacturingNotFound, ManufacturingOverview,
   ManufacturingSettings, ManufacturingShell,
 } from './pages/manufacturing';
-import { BuildDetail, BuildDirectory } from './pages/buildtrackr';
+import { BuildDetail, BuildDirectory } from './pages/producttrackr';
 import { ManufacturingRecordDetailPage, ManufacturingRecordsPage, NewManufacturingRecordPage } from './pages/manufacturing-records';
 import { WorkspaceSwitcher } from './workspace-switcher';
+import { SupplierWorkPage } from './pages/supplier-work';
 import './styles.css';
 
 function Shell() {
@@ -91,6 +92,7 @@ createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><
       <Route path={`${kind}/:id`} element={<BuildDetail key={kind} kind={kind} />} />
     </Route>)}
     <Route path="records" element={<ManufacturingRecordsPage />} />
+    <Route path="supplier-work" element={<SupplierWorkPage />} />
     <Route path="records/new" element={<NewManufacturingRecordPage />} />
     <Route path="records/:id" element={<ManufacturingRecordDetailPage />} />
     <Route path="blueprint" element={<Navigate replace to="/manufacturing/operations" />} />

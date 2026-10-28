@@ -1,4 +1,4 @@
-"""Complete, isolated BuildTrackr archives and verified recovery."""
+"""Complete, isolated ProductTrackr archives and verified recovery."""
 
 import hashlib
 import io
@@ -26,6 +26,7 @@ from .backups import (
 )
 from .domain import Identifier, Name, Problem, Text, now, today
 from .manufacturing_domain import MODELS, Assignment, Step
+from .manufacturing_drive import child_folder, relocate, require_private
 from .manufacturing_records import ManufacturingRecords
 from .storage import DriveBackend, digest, encode
 
@@ -41,7 +42,9 @@ FILES = {
     "sequences": "number-counters.json",
     "writes": "write-receipts.json",
 }
-RESERVED = {"datasets", "backups", "backupOperations", "restoreOperations", "cleanupOperations"}
+RESERVED = {
+    "datasets", "backups", "backupOperations", "restoreOperations", "cleanupOperations", "productFolders",
+}
 HASH = re.compile(r"^[a-f0-9]{64}$")
 NUMBER = re.compile(r"^MFG-[0-9]{5,}$")
 
@@ -81,11 +84,11 @@ def assignment_snapshot(value):
         "external",
         "internal",
     ):
-        raise ValueError("Invalid actual partner.")
+        raise ValueError("Invalid actual supplier.")
     contact = value["contact"]
     if contact is not None:
         if value["type"] != "company":
-            raise ValueError("Individual partners cannot have company contacts.")
+            raise ValueError("Individual suppliers cannot have company contacts.")
         validate_value(Identifier, contact["id"])
         validate_value(Name, contact["name"])
         for field in ("designation", "email", "phone"):
@@ -225,7 +228,7 @@ def checked_data(data):
             source = data["steps"][row["stepId"]]
             partner = data["partners"][row["partnerId"]]
             if source["productId"] != row["productId"]:
-                raise ValueError("Invalid partner link ownership.")
+                raise ValueError("Invalid supplier link ownership.")
             if row["contactId"] and (
                 partner["type"] != "company"
                 or data["contacts"][row["contactId"]]["partnerId"] != partner["id"]
@@ -233,7 +236,7 @@ def checked_data(data):
                 raise ValueError("Invalid linked company contact.")
             group = links.setdefault(row["stepId"], {})
             if partner["id"] in group:
-                raise ValueError("Duplicate partner link.")
+                raise ValueError("Duplicate supplier link.")
             group[partner["id"]] = row["id"]
         for row in data["steps"].values():
             Step.model_validate({key: row[key] for key in Step.model_fields})
@@ -242,7 +245,7 @@ def checked_data(data):
                 or row["operationId"] not in data["operations"]
                 or row["primaryAssignmentId"] not in (set(links.get(row["id"], {}).values()) or {None})
             ):
-                raise ValueError("Invalid operation or primary partner.")
+                raise ValueError("Invalid operation or primary supplier.")
         numbers, events = set(), {}
         for key, record in data["manufacturingRecords"].items():
             checked_record(record, data)
@@ -310,7 +313,7 @@ def checked_data(data):
         OverflowError,
     ):
         raise Problem(
-            "This is not a complete, consistent BuildTrackr snapshot. No live data was changed.",
+            "This is not a complete, consistent ProductTrackr snapshot. No live data was changed.",
             422,
             "invalid_backup",
         ) from None
@@ -323,7 +326,7 @@ def archive(data, *, source, operation_id, actor, control):
         for kind, name in {**FILES, "settings": "workspace-settings.json"}.items()
     }
     manifest = {
-        "format": "buildtrackr-backup",
+        "format": "producttrackr-backup",
         "version": 1,
         "createdAt": now(),
         "source": source,
@@ -370,7 +373,7 @@ def read_archive(content):
                 raise ValueError("Unsafe or incomplete archive.")
             manifest = _json(archive_file.read("manifest.json"))
             if (
-                manifest["format"] != "buildtrackr-backup"
+                manifest["format"] != "producttrackr-backup"
                 or manifest["version"] != 1
                 or manifest["source"] not in BACKUP_SOURCES
                 or manifest["checksum"] != digest({k: v for k, v in manifest.items() if k != "checksum"})
@@ -401,7 +404,7 @@ def read_archive(content):
         OverflowError,
     ):
         raise Problem(
-            "Select a complete, supported BuildTrackr backup, not a SalesTrackr archive. "
+            "Select a complete, supported ProductTrackr backup, not a SalesTrackr archive. "
             "No live data was changed.",
             422,
             "invalid_backup",
@@ -411,7 +414,7 @@ def read_archive(content):
 def backup_row(file_id, data, manifest, *, name=None):
     return {
         "id": file_id,
-        "name": name or f"BuildTrackr-{manifest['source']}-{manifest['createdAt'][:10]}.zip",
+        "name": name or f"ProductTrackr-{manifest['source']}-{manifest['createdAt'][:10]}.zip",
         "createdAt": manifest["createdAt"],
         "source": manifest["source"],
         "protected": False,
@@ -422,66 +425,62 @@ def backup_row(file_id, data, manifest, *, name=None):
 
 
 class ManufacturingDriveBackupStore(DriveBackupStore):
-    app = "buildtrackr-backup"
+    app = "producttrackr-backup"
 
     def __init__(self, settings):
         self.folder_id = settings.manufacturing_backup_folder_id
-        if not self.folder_id or not settings.token_json:
+        token = settings.manufacturing_token_json or settings.token_json
+        if not self.folder_id or not token:
             raise Problem(
-                "Configure BuildTrackr's backup folder and reconnect Google Drive.", 503, "backup_folder"
+                "Configure ProductTrackr's backup folder and reconnect Google Drive.", 503, "backup_folder"
             )
         self.sales_folders = {settings.root_id, settings.backup_folder_id} - {""}
-        self.backend = DriveBackend(settings.token_json, self.folder_id, operator=True)
+        scopes = json.loads(token).get("scopes") if settings.manufacturing_token_json else None
+        self.backend = DriveBackend(token, self.folder_id, operator=True, scopes=scopes)
         self.folder_url = None
 
-    def _folder(self):
+    def _root_folder(self):
         folder = identifier(self.folder_id)
         metadata = self.backend._execute(
             self.backend._api()
             .files()
             .get(
                 fileId=folder,
-                fields="id,parents,mimeType,trashed,appProperties",
+                fields="id,name,parents,mimeType,trashed,appProperties",
             )
         )
         if (
             folder in self.sales_folders
             or metadata.get("trashed")
             or metadata.get("mimeType") != "application/vnd.google-apps.folder"
-            or metadata.get("appProperties", {}).get("app") not in (None, "buildtrackr-backups")
+            or metadata.get("appProperties", {}).get("app") not in (None, "producttrackr-backups")
             or self.sales_folders.intersection(metadata.get("parents", []))
         ):
             raise Problem(
-                "Use BuildTrackr's separate private backup folder, not a SalesTrackr folder.",
+                "Use ProductTrackr's separate private backup folder, not a SalesTrackr folder.",
                 503,
                 "backup_folder",
             )
-        token = None
-        while True:
-            permissions = self.backend._execute(
-                self.backend._api()
-                .permissions()
-                .list(
-                    fileId=folder,
-                    fields="nextPageToken,permissions(type)",
-                    pageSize=100,
-                    pageToken=token,
-                )
-            )
-            if any(permission["type"] in ("anyone", "domain") for permission in permissions["permissions"]):
-                raise Problem(
-                    "Use a private BuildTrackr backup folder, not public or whole-domain sharing.",
-                    503,
-                    "backup_permissions",
-                )
-            token = permissions.get("nextPageToken")
-            if not token:
-                break
+        require_private(self.backend, folder)
+        return folder
+
+    def _folder(self):
+        folder = child_folder(self.backend, self._root_folder(), "backups")
         self.folder_url = f"https://drive.google.com/drive/folders/{folder}"
         return folder
 
+    def products_folder(self):
+        return child_folder(self.backend, self._root_folder(), "products")
+
     def inventory(self):
         folder = self._folder()
+        for item in self.backend._list(
+            f"'{self.folder_id}' in parents and trashed = false and mimeType = 'application/zip' "
+            "and appProperties has { key='app' and value='producttrackr-backup' }", fields="id",
+        ):
+            relocate(
+                self.backend, item["id"], self.folder_id, folder, "application/zip", {"app": self.app},
+            )
         return [
             {
                 "id": item["id"],
@@ -492,15 +491,28 @@ class ManufacturingDriveBackupStore(DriveBackupStore):
             }
             for item in self.backend._list(
                 f"'{folder}' in parents and trashed = false and mimeType = 'application/zip' "
-                "and appProperties has { key='app' and value='buildtrackr-backup' }",
+                "and appProperties has { key='app' and value='producttrackr-backup' }",
                 fields="id,name,size,md5Checksum,createdTime",
             )
         ]
 
     def _metadata(self, file_id):
+        folder = self._folder()
+        try:
+            metadata = self.backend._execute(self.backend._api().files().get(
+                fileId=identifier(file_id), fields="id,parents,trashed",
+            ))
+        except Problem as error:
+            if error.code == "drive_missing":
+                return None
+            raise
+        if not metadata.get("trashed") and metadata.get("parents") == [self.folder_id]:
+            relocate(
+                self.backend, file_id, self.folder_id, folder, "application/zip", {"app": self.app},
+            )
         metadata = super()._metadata(file_id)
         if metadata and metadata.get("appProperties", {}).get("app") != self.app:
-            raise Problem("This file is not a managed BuildTrackr backup.", 409, "backup_changed")
+            raise Problem("This file is not a managed ProductTrackr backup.", 409, "backup_changed")
         return metadata
 
 
@@ -516,22 +528,23 @@ class ManufacturingBackupManager(BackupManager):
                 if settings.manufacturing_backup_storage == "drive"
                 else LocalBackupStore(
                     settings.data_dir
-                    / "buildtrackr-backups"
-                    / digest(
-                        {
-                            "project": settings.manufacturing_project,
-                            "workspace": settings.manufacturing_workspace,
-                        }
-                    )[:24]
+                    / "producttrackr-backups"
+                    / digest(settings.manufacturing_identity(repository.workspace.id))[:24]
                 )
             )
         super().__init__(repository, settings, store)
         self.signing_key = repository.signing_key
 
+    def admin(self, actor):
+        return (
+            self.settings.mode == "demo"
+            or actor.casefold() in (self.settings.manufacturing_admins or self.settings.recovery_admins)
+        )
+
     def check_backup_control(self, control):
         if control.get("pendingRecordCleanup"):
             raise Problem(
-                "Resume the pending BuildTrackr record cleanup before creating backups.",
+                "Resume the pending ProductTrackr record cleanup before creating backups.",
                 503, "cleanup_pending",
             )
 
@@ -542,9 +555,10 @@ class ManufacturingBackupManager(BackupManager):
             **status,
             **self.repo.meta(),
             "provider": "local" if local else "drive",
-            "location": "Local simulated BuildTrackr backup folder"
+            "schedule": {**status["schedule"], "active": False},
+            "location": "Local simulated ProductTrackr backup folder"
             if local
-            else "Private BuildTrackr Google Drive folder",
+            else "ProductTrackr / Backups in private Google Drive",
             "configuredFolderUrl": (
                 f"https://drive.google.com/drive/folders/{self.settings.manufacturing_backup_folder_id}"
                 if self.settings.manufacturing_backup_folder_id
@@ -558,7 +572,7 @@ class ManufacturingBackupManager(BackupManager):
         self.repo.sync()
         control = self.repo.control
         if control.get("maintenance"):
-            raise Problem("BuildTrackr recovery is in progress.", 503, "maintenance")
+            raise Problem("ProductTrackr recovery is in progress.", 503, "maintenance")
         value = {
             "hash": hashlib.sha256(data).hexdigest(),
             "actor": actor,
@@ -572,12 +586,12 @@ class ManufacturingBackupManager(BackupManager):
             "generation": control["generation"],
             "expiresAt": datetime.fromtimestamp(value["expires"], timezone.utc).isoformat(),
             "warnings": [
-                "This replaces all BuildTrackr products, operations, partners, contacts, process links, "
+                "This replaces all ProductTrackr products, operations, suppliers, contacts, process links, "
                 "manufacturing records and activity history; it is not a merge.",
-                "Current BuildTrackr data is backed up and verified before "
+                "Current ProductTrackr data is backed up and verified before "
                 "the restored dataset is activated.",
                 "SalesTrackr data, settings and backups are not changed.",
-                "All open BuildTrackr forms must be reloaded after recovery.",
+                "All open ProductTrackr forms must be reloaded after recovery.",
             ],
         }
 

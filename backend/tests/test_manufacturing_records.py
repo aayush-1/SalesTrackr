@@ -163,6 +163,79 @@ def test_creation_snapshots_independent_jobs_and_idempotent_numbers(process):
     assert client.get(f"/api/manufacturing/records/{first['id']}/history").json()["total"] == 2
 
 
+def test_supplier_work_lists_only_actual_current_assignments_with_search_and_pagination(process):
+    client, _, product, company, contact, _, _, individual = process
+    first, _ = job(client, product)
+    first = apply(client, first, "assign", partnerId=company["id"], contactId=contact["id"])
+    second, _ = job(client, product)
+    second = apply(client, second, "assign", partnerId=individual["id"])
+    job(client, product)
+    endpoint = "/api/manufacturing/records/supplier-work"
+    result = client.get(endpoint).json()
+    assert result["total"] == result["supplierCount"] == 2
+    assert result["jobCount"] == 2
+    assert [row["id"] for row in result["items"]] == [company["id"], individual["id"]]
+    current = client.get(endpoint, params={"partnerId": company["id"]}).json()
+    assert current["supplierName"] == company["name"]
+    assert current["items"][0]["id"] == first["id"]
+    assert current["items"][0]["currentOperationName"] == "Machining"
+    assert current["items"][0]["productReference"] == "GEAR-042"
+    assert client.get(endpoint, params={"offset": 1, "limit": 1}).json()["items"][0]["id"] == individual["id"]
+    for term, expected in [
+        ("company a", [company["id"]]), ("alex", [company["id"]]),
+        ("gear-042", [company["id"], individual["id"]]),
+        ("machining", [company["id"], individual["id"]]), ("missing", []),
+    ]:
+        found = client.get(endpoint, params={"search": term}).json()
+        assert [row["id"] for row in found["items"]] == expected
+    first = apply(client, first, "complete")
+    assert first["status"] == "ready"
+    assert client.get(endpoint).json()["items"][0]["id"] == individual["id"]
+    assert client.get(endpoint, params={"partnerId": company["id"]}).json()["total"] == 0
+    second = apply(client, second, "cancel", reason="No longer active")
+    assert client.get(endpoint).json()["total"] == 0
+    for _ in range(2):
+        first = apply(client, first, "assign", partnerId=company["id"])
+        first = apply(client, first, "complete")
+    assert first["status"] == "completed"
+    assert client.get(endpoint).json()["items"] == []
+
+
+def test_supplier_work_groups_before_pagination_and_opens_all_current_supplier_jobs(process):
+    client, _, product, company, contact, _, _, individual = process
+    first, _ = job(client, product)
+    first = apply(client, first, "assign", partnerId=company["id"], contactId=contact["id"])
+    other = create(client, "products", name="Second part", reference="SECOND-01")
+    operation_id = detail(client, product)["steps"][0]["operationId"]
+    source = step(client, other, {"id": operation_id})
+    response, _ = command(
+        client, f"/steps/{source['id']}/assignments", {"partnerId": company["id"]}, source["version"],
+    )
+    assert response.status_code == 200
+    assigned = [first]
+    for _ in range(2):
+        current, _ = job(client, other)
+        assigned.append(apply(client, current, "assign", partnerId=company["id"]))
+    unrelated, _ = job(client, product)
+    apply(client, unrelated, "assign", partnerId=individual["id"])
+    endpoint = "/api/manufacturing/records/supplier-work"
+    result = client.get(endpoint, params={"limit": 1}).json()
+    assert result["total"] == result["supplierCount"] == 2 and result["jobCount"] == 4
+    assert result["items"] == [{
+        "id": company["id"], "name": company["name"], "jobCount": 3, "productCount": 2,
+    }]
+    following = client.get(endpoint, params={"offset": 1, "limit": 1}).json()
+    assert following["items"][0]["id"] == individual["id"]
+    found = client.get(endpoint, params={"search": "SECOND-01"}).json()
+    assert found["total"] == 1 and found["items"][0]["jobCount"] == 3
+    pages = [
+        client.get(endpoint, params={"partnerId": company["id"], "offset": offset, "limit": 1}).json()
+        for offset in range(3)
+    ]
+    assert all(page["total"] == 3 for page in pages)
+    assert {page["items"][0]["id"] for page in pages} == {row["id"] for row in assigned}
+
+
 def test_creation_rejects_empty_and_changed_preview_but_not_unrelated_changes(process):
     client, _, product, *_ = process
     empty = create(client, "products", name="No operations")

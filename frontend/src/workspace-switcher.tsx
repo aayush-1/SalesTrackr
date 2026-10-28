@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 
 const workspaces = [
   { id: 'sales', name: 'SalesTrackr', description: 'Sales, customers and collections', to: '/', Icon: ArrowUpRight },
-  { id: 'manufacturing', name: 'BuildTrackr', description: 'Products, operations and partners', to: '/manufacturing', Icon: Factory },
+  { id: 'manufacturing', name: 'ProductTrackr', description: 'Products, operations and suppliers', to: '/manufacturing', Icon: Factory },
 ] as const;
 
 export function WorkspaceSwitcher({ current, onSwitch }: {

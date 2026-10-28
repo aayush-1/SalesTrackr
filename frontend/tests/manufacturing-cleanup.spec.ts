@@ -6,7 +6,7 @@ const identifier = () => crypto.randomUUID().replaceAll('-', '');
 async function write(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null, id = identifier()) {
   const meta = await (await request.get('/api/manufacturing/meta')).json();
   const response = await request.post(`/api/manufacturing${path}`, {
-    headers: { 'X-SalesTrackr-Request': '1', 'X-BuildTrackr-Workspace': meta.workspaceId, 'X-BuildTrackr-Generation': meta.generation },
+    headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation },
     data: { writeId: identifier(), id, baseVersion, data },
   });
   expect(response.ok(), await response.text()).toBe(true); return id;

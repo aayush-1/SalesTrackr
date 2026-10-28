@@ -18,7 +18,7 @@ def app(tmp_path):
         pytest.skip("Requires the explicitly configured local Firestore emulator.")
     settings = Settings(
         "demo", tmp_path, "", "", "", "", False,
-        manufacturing_enabled=True, manufacturing_project="demo-buildtrackr-tests",
+        manufacturing_enabled=True, manufacturing_project="demo-producttrackr-tests",
         manufacturing_workspace=uuid4().hex,
     )
     with TestClient(create_app(settings)) as client:
@@ -29,8 +29,8 @@ def app(tmp_path):
 def command(client, path, data, base=None, entity_id=None, method="POST", body=None, headers=None):
     meta = client.get("/api/manufacturing/meta").json()
     headers = headers if headers is not None else {
-        "X-SalesTrackr-Request": "1", "X-BuildTrackr-Workspace": meta["workspaceId"],
-        "X-BuildTrackr-Generation": meta["generation"],
+        "X-SalesTrackr-Request": "1", "X-ProductTrackr-Workspace": meta["workspaceId"],
+        "X-ProductTrackr-Generation": meta["generation"],
     }
     body = body or {"writeId": uuid4().hex, "id": entity_id or uuid4().hex, "baseVersion": base, "data": data}
     return client.request(method, "/api/manufacturing" + path, json=body, headers=headers), body
@@ -246,7 +246,7 @@ def test_workspace_fence_and_no_sales_data_reuse(app):
         {"X-SalesTrackr-Request": "1"},
         {
             "X-SalesTrackr-Request": "1",
-            "X-BuildTrackr-Workspace": "wrong", "X-BuildTrackr-Generation": "wrong",
+            "X-ProductTrackr-Workspace": "wrong", "X-ProductTrackr-Generation": "wrong",
         },
     ]:
         assert command(client, "/products", {"name": "Blocked"}, headers=headers)[0].status_code == 409
@@ -326,8 +326,8 @@ def test_edits_preserve_relationships_and_reject_foreign_references(app):
     repo = ManufacturingRepository(settings)
     repo.workspace.update({"generation": uuid4().hex})
     assert command(client, "/products", {"name": "Old page"}, headers={
-        "X-SalesTrackr-Request": "1", "X-BuildTrackr-Workspace": old_meta["workspaceId"],
-        "X-BuildTrackr-Generation": old_meta["generation"],
+        "X-SalesTrackr-Request": "1", "X-ProductTrackr-Workspace": old_meta["workspaceId"],
+        "X-ProductTrackr-Generation": old_meta["generation"],
     })[0].status_code == 409
 
 

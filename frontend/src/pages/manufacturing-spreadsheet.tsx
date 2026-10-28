@@ -14,21 +14,21 @@ type ExportStatus = ManufacturingMeta & {
 };
 const pending = new Map<string, string>();
 const labels: [string, string, string][] = [
-  ['products', 'Products', 'Product IDs, names and ordered operation summaries.'],
-  ['steps', 'Product operations', 'Step order, instructions and all partner choices, with the primary highlighted.'],
-  ['assignments', 'Partner links', 'Every partner option and its selected company contact.'],
+  ['products', 'Products', 'Part numbers, names and ordered operation summaries.'],
+  ['steps', 'Product operations', 'Step order, instructions and all supplier choices, with the primary highlighted.'],
+  ['assignments', 'Supplier links', 'Every supplier option and its selected company contact.'],
   ['operations', 'Operations', 'All reusable operations, including unused ones.'],
-  ['partners', 'Partners', 'Companies, individuals, contact details and internal/external relationships.'],
-  ['contacts', 'Contacts', 'All company contacts, with their owning partner.'],
+  ['partners', 'Suppliers', 'Companies, individuals, contact details and internal/external relationships.'],
+  ['contacts', 'Contacts', 'All company contacts, with their owning supplier.'],
 ];
 const keyDescriptions = [
-  ['Product key', 'The Product process this row belongs to. Not the user-entered Product ID.'],
+  ['Product key', 'The Product process this row belongs to. Not the user-entered Part number.'],
   ['Step key', 'One particular step in that Product process, even if an operation is repeated.'],
   ['Operation key', 'The reusable operation definition.'],
-  ['Partner key', 'The company or independent person.'],
+  ['Supplier key', 'The company or independent person.'],
   ['Contact key', 'The optional person at that company.'],
-  ['Link key', 'One partner/contact option linked to a particular Product step.'],
-  ['Primary link key', 'The preferred partner option for that Product step.'],
+  ['Link key', 'One supplier/contact option linked to a particular Product step.'],
+  ['Primary link key', 'The preferred supplier option for that Product step.'],
 ];
 
 function RelationshipKeyHelp() {
@@ -82,13 +82,13 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
         throw new ManufacturingError('Export is unconfirmed. Retry export.', 503);
       }
       if (result.workspaceId !== identity.workspaceId || result.generation !== identity.generation) {
-        throw new ManufacturingError('BuildTrackr changed. Reload before exporting.', 409, 'workspace_changed');
+        throw new ManufacturingError('ProductTrackr changed. Reload before exporting.', 409, 'workspace_changed');
       }
       ticket.current = null; pending.delete(key); setUnconfirmed(false);
       setStatus(old => ({ ...old, spreadsheet: result, lastError: null }));
       setNotice(result.provider === 'local'
         ? 'Spreadsheet updated and verified locally. Nothing was uploaded to Google Drive.'
-        : 'The same directory workbook was updated and verified in your BuildTrackr Drive folder.');
+        : 'The same directory workbook was updated and verified in your ProductTrackr Drive folder.');
       refresh();
     } catch (reason) {
       if (reason instanceof ManufacturingError && reason.code === 'workspace_changed') noteWorkspaceChange();
@@ -103,11 +103,11 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
   return <div className="backup-settings">
     <div className="alert warning"><FileSpreadsheet size={18} /><span>{local
       ? 'Local preview only. This updates a downloadable XLSX on this computer, not Google Drive.'
-      : 'Exports use your private BuildTrackr folder. The same managed workbook is updated, not a new copy each time.'}</span></div>
+      : 'Exports use your private ProductTrackr folder. The same managed workbook is updated, not a new copy each time.'}</span></div>
     <section className="panel details-panel settings-section">
       <div className="section-heading compact">
         <div><h2><FileSpreadsheet size={19} />Directory spreadsheet</h2>
-          <p>Products first, with the complete process and partner/contact relationships in linked worksheet tabs.</p></div>
+          <p>Products first, with the complete process and supplier/contact relationships in linked worksheet tabs.</p></div>
         <button className="button primary" onClick={exportSpreadsheet} disabled={busy || workspaceChanged || !status.canExport}>
           {busy ? <LoaderCircle size={16} className="spin" /> : exported || unconfirmed ? <RefreshCw size={16} /> : <FileSpreadsheet size={16} />}
           {busy ? 'Updating spreadsheet...' : unconfirmed ? 'Retry export' : exported ? 'Update spreadsheet' : 'Create spreadsheet'}
@@ -115,11 +115,11 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
       </div>
       {error && <Alert>{error}</Alert>}
       {notice && <Alert tone="success">{notice}</Alert>}
-      <p><strong>{status.name}</strong> is a snapshot, not a two-way sync. Editing the spreadsheet does not change BuildTrackr.
+      <p><strong>{status.name}</strong> is a snapshot, not a two-way sync. Editing the spreadsheet does not change ProductTrackr.
         Every export replaces its contents, including any manual spreadsheet edits.</p>
-      <p>Stable internal keys preserve relationships even when names or Product IDs repeat. Click the linked cells to jump
-        between products, operation steps, partner options and company contacts. Empty processes and unlinked directory entries are included.</p>
-      <p><strong>All partners are included.</strong> Product operations lists every available partner name; Partner links
+      <p>Stable internal keys preserve relationships even when names or Part numbers repeat. Click the linked cells to jump
+        between products, operation steps, supplier options and company contacts. Empty processes and unlinked directory entries are included.</p>
+      <p><strong>All suppliers are included.</strong> Product operations lists every available supplier name; Supplier links
         has one row per option, with its contact and a Yes/No primary flag. Technical key columns are hidden by default.</p>
       <div className="bt-export-sheets">{labels.map(([kind, label, description]) => <div key={kind}>
         <strong>{label}{exported ? ` (${exported.counts[kind]})` : ''}</strong><p>{description}</p>
@@ -136,7 +136,7 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
         {local && <p className="muted">Open spreadsheet is available after a Google Drive export. This local preview only provides a download.</p>}
       </div>}
       <RelationshipKeyHelp />
-      {status.folderUrl && <p><a href={status.folderUrl} target="_blank" rel="noreferrer">Configured BuildTrackr folder</a>
+      {status.folderUrl && <p><a href={status.folderUrl} target="_blank" rel="noreferrer">Configured ProductTrackr folder</a>
         {local && ' (not used by this local export)'}</p>}
       <p className="muted">Manufacturing jobs, history and write receipts are not included. This report is not a recovery
         backup; use Data &amp; recovery for a full workspace backup. SalesTrackr is not changed.</p>

@@ -7,7 +7,7 @@ async function create(request: APIRequestContext, kind: string, data: object) {
   const meta = await (await request.get('/api/manufacturing/meta')).json();
   const id = identifier();
   const response = await request.post(`/api/manufacturing/${kind}`, {
-    headers: { 'X-SalesTrackr-Request': '1', 'X-BuildTrackr-Workspace': meta.workspaceId, 'X-BuildTrackr-Generation': meta.generation },
+    headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation },
     data: { writeId: identifier(), id, baseVersion: null, data },
   });
   expect(response.ok(), await response.text()).toBe(true);
@@ -36,7 +36,7 @@ test('one-click export updates the same downloadable workbook and leaves directo
   const first = (await (await request.get(path)).json()).spreadsheet;
   const download = page.waitForEvent('download');
   await page.getByRole('link', { name: 'Download spreadsheet', exact: true }).click();
-  expect((await download).suggestedFilename()).toBe('BuildTrackr Directory.xlsx');
+  expect((await download).suggestedFilename()).toBe('ProductTrackr Directory.xlsx');
   const workbook = await request.get(`${path}/download`);
   expect(workbook.headers()['content-type']).toContain('spreadsheetml.sheet');
   expect((await workbook.body()).subarray(0, 2).toString()).toBe('PK');

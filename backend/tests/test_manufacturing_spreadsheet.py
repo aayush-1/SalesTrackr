@@ -60,7 +60,7 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
     client, settings, product, company, contact, other_company, other_contact, individual = process
     unused = create(client, "products", name="Unused product", reference=product["reference"])
     operation = create(client, "operations", name="Unused operation", description='=HYPERLINK("bad","bad")')
-    lone = create(client, "partners", name="Standalone partner", phone="0012345678")
+    lone = create(client, "partners", name="Standalone supplier", phone="0012345678")
     unlinked = create(client, "contacts", name="Unlinked contact", partnerId=company["id"], phone="+91 01234")
     current = detail(client, product)["entity"]
     command(
@@ -80,9 +80,9 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
     assert book.sheetnames == [
         "Products",
         "Product operations",
-        "Partner links",
+        "Supplier links",
         "Operations",
-        "Partners",
+        "Suppliers",
         "Contacts",
         "Export info",
     ]
@@ -94,22 +94,22 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
     assert [row["Step key"] for row in route] == before["products"][product["id"]]["stepIds"]
     assert [row["Step"] for row in route] == [1, 2, 3]
     assert all(
-        row["Primary partner"] == company["name"]
+        row["Primary supplier"] == company["name"]
         and row["Primary contact"] == contact["name"]
-        and row["Partner options"] == 2
+        and row["Supplier options"] == 2
         for row in route
     )
     assert all(
-        f"{company['name']} (primary)" in row["Available partners"]
-        and individual["name"] in row["Available partners"]
+        f"{company['name']} (primary)" in row["Available suppliers"]
+        and individual["name"] in row["Available suppliers"]
         for row in route
     )
-    partner_links = rows(book, "Partner links")
+    partner_links = rows(book, "Supplier links")
     assert {row["Link key"] for row in partner_links} == before["assignments"].keys()
     for row in partner_links:
         original = before["assignments"][row["Link key"]]
         assert row["Product key"] == original["productId"] and row["Step key"] == original["stepId"]
-        assert row["Partner key"] == original["partnerId"]
+        assert row["Supplier key"] == original["partnerId"]
         assert (row["Contact key"] or None) == original["contactId"]
         assert row["Primary"] == ("Yes" if original["partnerId"] == company["id"] else "No")
     assert {row["Contact key"] for row in rows(book, "Contacts")} == {
@@ -117,7 +117,7 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
         other_contact["id"],
         unlinked["id"],
     }
-    partners = {row["Partner key"]: row for row in rows(book, "Partners")}
+    partners = {row["Supplier key"]: row for row in rows(book, "Suppliers")}
     assert partners[other_company["id"]]["Relationship"] == "internal"
     assert partners[individual["id"]]["Type"] == "individual"
     assert partners[lone["id"]]["Phone"] == "0012345678"
@@ -145,7 +145,7 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
 def test_updates_same_workbook_without_stale_rows_or_growing_metadata(process):
     client, settings, product, *_ = process
     first = export(client)
-    before_files = list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))
+    before_files = list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
     current = detail(client, product)
     non_primary = next(row for row in current["assignments"] if row["contactId"] is None)
     step = next(row for row in current["steps"] if row["id"] == non_primary["stepId"])
@@ -175,8 +175,8 @@ def test_updates_same_workbook_without_stale_rows_or_growing_metadata(process):
     book, _ = download(client)
     assert rows(book, "Products")[0]["Product"] == "Renamed product"
     assert rows(book, "Products")[0]["Notes"] == "Updated report"
-    assert non_primary["id"] not in {row["Link key"] for row in rows(book, "Partner links")}
-    assert list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx")) == before_files
+    assert non_primary["id"] not in {row["Link key"] for row in rows(book, "Supplier links")}
+    assert list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx")) == before_files
     assert set(ManufacturingRepository(settings).workspace.get().to_dict()["directorySpreadsheet"]) == {
         "provider",
         "writeId",
@@ -202,14 +202,18 @@ def test_empty_workspace_exports_headers_without_seeding_entities(app):
 def test_authorization_csrf_and_workspace_fencing_precede_export(process):
     client, settings, *_ = process
     assert client.get(f"{PATH}/download").status_code == 404
-    export(client, expected=409, request_headers={**headers(client), "X-BuildTrackr-Generation": uuid4().hex})
-    export(client, expected=409, request_headers={**headers(client), "X-BuildTrackr-Workspace": uuid4().hex})
+    export(client, expected=409, request_headers={
+        **headers(client), "X-ProductTrackr-Generation": uuid4().hex,
+    })
+    export(client, expected=409, request_headers={
+        **headers(client), "X-ProductTrackr-Workspace": uuid4().hex,
+    })
     assert client.post(PATH, json={"writeId": uuid4().hex}).status_code == 403
     with patch.object(SpreadsheetExport, "admin", return_value=False):
         assert client.get(PATH).json()["canExport"] is False
         export(client, expected=403)
         assert client.get(f"{PATH}/download").status_code == 403
-    assert not list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
 
 
 def test_failed_upload_and_unverified_readback_retry_same_file(process):
@@ -229,7 +233,7 @@ def test_failed_upload_and_unverified_readback_retry_same_file(process):
     assert not repo.workspace.get().to_dict().get("maintenance")
     result = export(client, write_id)
     assert result["id"] == file_id and export(client, write_id) == result
-    assert len(list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))) == 1
+    assert len(list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))) == 1
     unchanged(repo, before)
     download(client)
 
@@ -247,7 +251,7 @@ def test_export_cannot_cross_maintenance_or_cleanup(process, state):
     repo = ManufacturingRepository(settings)
     repo.workspace.update(state)
     export(client, expected=503)
-    assert not list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
 
 
 def test_export_fences_mutations_and_backups_until_verified(process):
@@ -284,7 +288,7 @@ def test_generation_takeover_prevents_stale_worker_upload(process):
 
     with patch.object(SpreadsheetExport, "_update", takeover):
         export(client, expected=409)
-    assert not list(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
     assert not repo.workspace.get().to_dict().get("maintenance")
 
 
@@ -312,7 +316,7 @@ def test_invalid_or_oversized_report_never_replaces_existing_workbook(process):
     _, before = download(client)
     with patch("backend.app.manufacturing_spreadsheet.MAX_CELLS", 5):
         export(client, expected=413)
-    file = next(settings.data_dir.glob("buildtrackr-spreadsheets\\*\\*.xlsx"))
+    file = next(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
     assert file.read_bytes() == before
     repo = ManufacturingRepository(settings)
     repo.ref("products", product["id"]).update({"stepIds": ["missing-step"]})
@@ -330,7 +334,7 @@ def test_invalid_or_oversized_report_never_replaces_existing_workbook(process):
 
 def mock_drive():
     store = object.__new__(DriveSpreadsheetStore)
-    store.scope, store.folder_id = "workspace-scope", "buildtrackr-folder"
+    store.scope, store.folder_id = "workspace-scope", "producttrackr-folder"
     store._folder = Mock(return_value=store.folder_id)
     store.backend = Mock()
     store.backend.etag.return_value = '"workbook-etag"'
@@ -385,7 +389,7 @@ def test_drive_reuses_scoped_workbook_and_updates_only_its_media():
         {"trashed": True},
         {"mimeType": "application/vnd.google-apps.spreadsheet"},
         {"appProperties": {"app": "unrelated", "workspace": "workspace-scope"}},
-        {"appProperties": {"app": "buildtrackr-directory-spreadsheet", "workspace": "other"}},
+        {"appProperties": {"app": "producttrackr-directory-spreadsheet", "workspace": "other"}},
     ],
 )
 def test_drive_rejects_moved_or_foreign_workbook(changed):

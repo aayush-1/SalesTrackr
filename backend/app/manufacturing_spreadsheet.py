@@ -20,7 +20,7 @@ from .manufacturing_backups import FILES, ManufacturingDriveBackupStore, checked
 from .storage import digest, encode
 
 KINDS = ("products", "operations", "partners", "contacts", "steps", "assignments")
-NAME = "BuildTrackr Directory.xlsx"
+NAME = "ProductTrackr Directory.xlsx"
 MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PATH = "/api/manufacturing/settings/spreadsheet"
 MAX_BYTES = 32 * 1024 * 1024
@@ -74,10 +74,10 @@ def workbook(data, identity):
         for title, rows in (
             ("Products", ordered["products"]),
             ("Operations", ordered["operations"]),
-            ("Partners", ordered["partners"]),
+            ("Suppliers", ordered["partners"]),
             ("Contacts", ordered["contacts"]),
             ("Product operations", [step for _, _, step in steps]),
-            ("Partner links", assignments),
+            ("Supplier links", assignments),
         )
     }
     links, contacts = defaultdict(list), defaultdict(list)
@@ -138,7 +138,7 @@ def workbook(data, identity):
 
     sheet(
         "Products",
-        ["Product ID", "Product", "Operations (in order)", "Process", "Notes", "Product key"],
+        ["Part number", "Product", "Operations (in order)", "Process", "Notes", "Product key"],
         [
             [
                 product["reference"],
@@ -159,16 +159,16 @@ def workbook(data, identity):
     sheet(
         "Product operations",
         [
-            "Product ID",
+            "Part number",
             "Product",
             "Step",
             "Operation",
-            "Available partners",
+            "Available suppliers",
             "Instructions",
-            "Primary partner",
+            "Primary supplier",
             "Primary contact",
-            "Partner options",
-            "Partner links",
+            "Supplier options",
+            "Supplier links",
             "Product key",
             "Step key",
             "Operation key",
@@ -186,16 +186,16 @@ def workbook(data, identity):
                     for link in links[step["id"]]
                 ),
                 step["instructions"],
-                ref(data["partners"][primary["partnerId"]]["name"], "Partners", primary["partnerId"])
+                ref(data["partners"][primary["partnerId"]]["name"], "Suppliers", primary["partnerId"])
                 if primary
                 else "",
                 ref(data["contacts"][primary["contactId"]]["name"], "Contacts", primary["contactId"])
                 if primary and primary["contactId"]
                 else "",
                 len(links[step["id"]]),
-                ref("View partner options", "Partner links", links[step["id"]][0]["id"])
+                ref("View supplier options", "Supplier links", links[step["id"]][0]["id"])
                 if links[step["id"]]
-                else "No linked partners",
+                else "No linked suppliers",
                 product["id"],
                 step["id"],
                 step["operationId"],
@@ -206,14 +206,14 @@ def workbook(data, identity):
         ],
     )
     sheet(
-        "Partner links",
+        "Supplier links",
         [
-            "Product ID",
+            "Part number",
             "Product",
             "Step",
             "Operation",
-            "Partner",
-            "Partner type",
+            "Supplier",
+            "Supplier type",
             "Relationship",
             "Contact",
             "Primary",
@@ -221,7 +221,7 @@ def workbook(data, identity):
             "Product key",
             "Step key",
             "Operation key",
-            "Partner key",
+            "Supplier key",
             "Contact key",
             "Link key",
         ],
@@ -231,7 +231,7 @@ def workbook(data, identity):
                 ref(product["name"], "Products", product["id"]),
                 ref(positions[step["id"]], "Product operations", step["id"]),
                 ref(data["operations"][step["operationId"]]["name"], "Operations", step["operationId"]),
-                ref(partner["name"], "Partners", partner["id"]),
+                ref(partner["name"], "Suppliers", partner["id"]),
                 partner["type"],
                 partner["relationship"],
                 ref(data["contacts"][link["contactId"]]["name"], "Contacts", link["contactId"])
@@ -262,9 +262,9 @@ def workbook(data, identity):
         [[row["name"], row["description"], row["id"]] for row in ordered["operations"]],
     )
     sheet(
-        "Partners",
+        "Suppliers",
         [
-            "Partner",
+            "Supplier",
             "Type",
             "Relationship",
             "Address",
@@ -272,7 +272,7 @@ def workbook(data, identity):
             "Phone",
             "Notes",
             "Contacts",
-            "Partner key",
+            "Supplier key",
         ],
         [
             [
@@ -293,11 +293,11 @@ def workbook(data, identity):
     )
     sheet(
         "Contacts",
-        ["Contact", "Company", "Designation", "Email", "Phone", "Contact key", "Partner key"],
+        ["Contact", "Company", "Designation", "Email", "Phone", "Contact key", "Supplier key"],
         [
             [
                 row["name"],
-                ref(data["partners"][row["partnerId"]]["name"], "Partners", row["partnerId"]),
+                ref(data["partners"][row["partnerId"]]["name"], "Suppliers", row["partnerId"]),
                 row["designation"],
                 row["email"],
                 row["phone"],
@@ -315,10 +315,10 @@ def workbook(data, identity):
             ["Workspace", identity["workspaceId"]],
             ["Source generation", identity["generation"]],
             ["Source sequence", identity["sourceSequence"]],
-            ["Contents", "All directory entities, ordered Product operations and partner/contact links."],
+            ["Contents", "All directory entities, ordered Product operations and supplier/contact links."],
             [
                 "Relationships",
-                "Keys are stable internal IDs; Product ID is the user-entered reference, not a unique key.",
+                "Keys are stable internal IDs; Part number is the user-entered reference, not a unique key.",
             ],
             [
                 "Usage",
@@ -346,7 +346,7 @@ class LocalSpreadsheetStore:
     provider = "local"
 
     def __init__(self, settings, scope):
-        self.path = settings.data_dir / "buildtrackr-spreadsheets" / scope / NAME
+        self.path = settings.data_dir / "producttrackr-spreadsheets" / scope / "ProductTrackr Directory.xlsx"
 
     def allocate(self):
         return "directory-workbook"
@@ -370,11 +370,14 @@ class LocalSpreadsheetStore:
 
 class DriveSpreadsheetStore(ManufacturingDriveBackupStore):
     provider = "drive"
-    app = "buildtrackr-directory-spreadsheet"
+    app = "producttrackr-directory-spreadsheet"
 
     def __init__(self, settings, scope):
         super().__init__(settings)
         self.scope = scope
+
+    def _folder(self):
+        return self._root_folder()
 
     def allocate(self):
         folder = self._folder()
@@ -489,7 +492,7 @@ class DriveSpreadsheetStore(ManufacturingDriveBackupStore):
 class SpreadsheetExport:
     def __init__(self, repository, settings, store=None):
         self.repo, self.settings = repository, settings
-        scope = digest({"project": settings.manufacturing_project, "workspace": self.repo.workspace.id})[:24]
+        scope = digest(settings.manufacturing_identity(self.repo.workspace.id))[:24]
         self.store = store or (
             DriveSpreadsheetStore(settings, scope)
             if settings.manufacturing_backup_storage == "drive"
@@ -497,7 +500,10 @@ class SpreadsheetExport:
         )
 
     def admin(self, actor):
-        return self.settings.mode == "demo" or actor.casefold() in self.settings.recovery_admins
+        return (
+            self.settings.mode == "demo"
+            or actor.casefold() in (self.settings.manufacturing_admins or self.settings.recovery_admins)
+        )
 
     def require_admin(self, actor):
         if not self.admin(actor):
@@ -583,7 +589,7 @@ class SpreadsheetExport:
                 or generation != control["generation"]
                 or generation != self.repo.control["generation"]
             ):
-                raise Problem("BuildTrackr changed. Reload before exporting.", 409, "workspace_changed")
+                raise Problem("ProductTrackr changed. Reload before exporting.", 409, "workspace_changed")
             state = control.get("directorySpreadsheet") or {}
             if state.get("provider") != self.store.provider:
                 state = {}
@@ -718,8 +724,8 @@ def manufacturing_spreadsheet_router(repository, settings):
         return manager().export(
             body.writeId,
             request.state.actor,
-            request.headers.get("x-buildtrackr-workspace"),
-            request.headers.get("x-buildtrackr-generation"),
+            request.headers.get("x-producttrackr-workspace"),
+            request.headers.get("x-producttrackr-generation"),
         )
 
     @router.get("/settings/spreadsheet/download")
