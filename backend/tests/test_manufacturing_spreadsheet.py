@@ -145,7 +145,8 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
 def test_updates_same_workbook_without_stale_rows_or_growing_metadata(process):
     client, settings, product, *_ = process
     first = export(client)
-    before_files = list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
+    before_files = list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))
+    assert len(before_files) == 1
     current = detail(client, product)
     non_primary = next(row for row in current["assignments"] if row["contactId"] is None)
     step = next(row for row in current["steps"] if row["id"] == non_primary["stepId"])
@@ -176,7 +177,7 @@ def test_updates_same_workbook_without_stale_rows_or_growing_metadata(process):
     assert rows(book, "Products")[0]["Product"] == "Renamed product"
     assert rows(book, "Products")[0]["Notes"] == "Updated report"
     assert non_primary["id"] not in {row["Link key"] for row in rows(book, "Supplier links")}
-    assert list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx")) == before_files
+    assert list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx")) == before_files
     assert set(ManufacturingRepository(settings).workspace.get().to_dict()["directorySpreadsheet"]) == {
         "provider",
         "writeId",
@@ -213,7 +214,7 @@ def test_authorization_csrf_and_workspace_fencing_precede_export(process):
         assert client.get(PATH).json()["canExport"] is False
         export(client, expected=403)
         assert client.get(f"{PATH}/download").status_code == 403
-    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))
 
 
 def test_failed_upload_and_unverified_readback_retry_same_file(process):
@@ -233,7 +234,7 @@ def test_failed_upload_and_unverified_readback_retry_same_file(process):
     assert not repo.workspace.get().to_dict().get("maintenance")
     result = export(client, write_id)
     assert result["id"] == file_id and export(client, write_id) == result
-    assert len(list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))) == 1
+    assert len(list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))) == 1
     unchanged(repo, before)
     download(client)
 
@@ -251,7 +252,7 @@ def test_export_cannot_cross_maintenance_or_cleanup(process, state):
     repo = ManufacturingRepository(settings)
     repo.workspace.update(state)
     export(client, expected=503)
-    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))
 
 
 def test_export_fences_mutations_and_backups_until_verified(process):
@@ -288,7 +289,7 @@ def test_generation_takeover_prevents_stale_worker_upload(process):
 
     with patch.object(SpreadsheetExport, "_update", takeover):
         export(client, expected=409)
-    assert not list(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
+    assert not list((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))
     assert not repo.workspace.get().to_dict().get("maintenance")
 
 
@@ -316,7 +317,7 @@ def test_invalid_or_oversized_report_never_replaces_existing_workbook(process):
     _, before = download(client)
     with patch("backend.app.manufacturing_spreadsheet.MAX_CELLS", 5):
         export(client, expected=413)
-    file = next(settings.data_dir.glob("producttrackr-spreadsheets\\*\\*.xlsx"))
+    file = next((settings.data_dir / "producttrackr-spreadsheets").rglob("*.xlsx"))
     assert file.read_bytes() == before
     repo = ManufacturingRepository(settings)
     repo.ref("products", product["id"]).update({"stepIds": ["missing-step"]})
