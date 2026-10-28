@@ -190,6 +190,7 @@ def restore_empty(repo, revisions):
         return value
 
     repo.control = activate(repo.client.transaction())
+    repo.sync()
     actual = {raw["id"]: digest(raw) for raw in repo.snapshot()[0]}
     expected = {raw["id"]: digest(raw) for raw in revisions}
     if actual != expected:

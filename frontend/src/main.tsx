@@ -45,7 +45,7 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
     ['leads', Leaf], ['followups', MessageSquare], ['orders', PackageCheck],
     ['dispatched', Truck], ['delivered', CheckCheck],
     ['pending', CircleDollarSign], ['paid', CircleDollarSign], ['closed', CheckCheck],
-    ['feedback-pending', MessageSquareText], ['discarded', ArchiveX],
+    ['feedback-pending', MessageSquareText], ['stock-pending', PackageCheck], ['discarded', ArchiveX],
   ] as const;
   return <div className={`app ${open ? 'navigation-open' : ''}`}>
     <aside className={`sidebar ${open ? 'open' : ''}`}>
