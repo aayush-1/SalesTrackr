@@ -1,6 +1,78 @@
 {
   "indexes": [
     {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "active", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "status", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "productId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "currentPartnerId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "currentOperationId", "order": "ASCENDING"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "searchChars", "arrayConfig": "CONTAINS"},
+        {"fieldPath": "createdAt", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecordEvents",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "recordId", "order": "ASCENDING"},
+        {"fieldPath": "sequence", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "products",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "searchChars", "arrayConfig": "CONTAINS"},
+        {"fieldPath": "nameKey", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "contacts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "partnerId", "order": "ASCENDING"},
+        {"fieldPath": "nameKey", "order": "ASCENDING"}
+      ]
+    },
+    {
       "collectionGroup": "entities",
       "queryScope": "COLLECTION",
       "fields": [
@@ -56,6 +128,13 @@
     }
   ],
   "fieldOverrides": [
+    {"collectionGroup": "manufacturingRecords", "fieldPath": "operations", "indexes": []},
+    {"collectionGroup": "manufacturingRecords", "fieldPath": "notes", "indexes": []},
+    {"collectionGroup": "manufacturingRecords", "fieldPath": "searchText", "indexes": []},
+    {"collectionGroup": "manufacturingRecordEvents", "fieldPath": "assignment", "indexes": []},
+    {"collectionGroup": "manufacturingRecordEvents", "fieldPath": "previousAssignment", "indexes": []},
+    {"collectionGroup": "manufacturingRecordEvents", "fieldPath": "note", "indexes": []},
+    {"collectionGroup": "manufacturingRecordEvents", "fieldPath": "reason", "indexes": []},
     {"collectionGroup": "parts", "fieldPath": "data", "indexes": []},
     {"collectionGroup": "entities", "fieldPath": "queryData", "indexes": []},
     {"collectionGroup": "entities", "fieldPath": "address", "indexes": []},

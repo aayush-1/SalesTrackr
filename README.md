@@ -132,6 +132,190 @@ With the emulator running, set `FIRESTORE_EMULATOR_HOST` as above and run the ba
 the real-emulator integration suite. CI starts an emulator and runs these tests automatically.
 See [Firestore layout, backup safety, and offline recovery](docs/architecture.md#firestore-backend-and-recovery).
 
+## ProductTrackr local workspace
+
+ProductTrackr (formerly ProductTrackr) is an independent manufacturing workspace at `/manufacturing`,
+with Products, Operations, Suppliers and Contacts. The user-entered product reference is labeled
+**Part number**; stable internal IDs remain unchanged. Each Product defines ordered operations
+and linked supplier choices, with exactly one primary when links exist. An optional contact
+must belong to that supplier's company. Individuals are suppliers directly, and in-house work
+uses an internal company supplier. These process links do not start real work.
+
+Manufacturing records at `/manufacturing/records` track individual jobs. Create a record from a
+saved Product to copy its operation route, then explicitly assign/start and complete each
+operation in sequence. Multiple jobs for the same Product advance independently. Copied routes
+and actual assignment labels stay unchanged by later directory edits; new assignments use the
+source step's currently linked suppliers. The overview shows work in process, waiting jobs,
+current suppliers and completed jobs. No quantities, stock, costing or supplier notifications
+are included.
+
+**Supplier work**, directly below Manufacturing records in navigation, opens a searchable,
+paginated sheet at `/manufacturing/supplier-work`. It shows one entry per supplier, with counts of
+in-progress jobs and products. Open a supplier to see its current manufacturing jobs, including
+contact, product, part number, current operation and a link to each job.
+Awaiting-assignment, completed and cancelled jobs are excluded. A preview appears below Current
+work on the overview.
+
+Reassignment and cancellation require a reason. The last completion can be undone only before
+the next operation starts (or to reopen the final operation of a completed record). Corrections
+append to paginated activity history rather than erasing earlier events. Actual work dates
+cannot be future-dated or contradict the operation sequence. Saves use optimistic versions and
+idempotent receipts, including record-number allocation and append-only events.
+
+ProductTrackr is an opt-in, separate manufacturing workspace. For local testing, start the
+localhost emulator described above, then add these variables before starting the application:
+
+```powershell
+$env:APP_MODE = "demo"
+$env:FIRESTORE_EMULATOR_HOST = "127.0.0.1:8085"
+$env:PRODUCTTRACKR_ENABLED = "true"
+$env:PRODUCTTRACKR_FIRESTORE_PROJECT_ID = "demo-producttrackr-local"
+$env:PRODUCTTRACKR_WORKSPACE_ID = "producttrackr"
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+For production, follow [ProductTrackr's first-deployment setup](docs/cloud-run-deployment.md#producttrackr-production).
+The deployment workflow uses SalesTrackr's `(default)` database with a separate `producttrackr`
+workspace and private Drive root. Both workspaces share the database's free quota.
+Local backups and spreadsheet exports remain on disk; production backups and exports use Drive.
+
+These settings do not change SalesTrackr's storage backend, project or workspace. Manufacturing
+uses dedicated collections, API routes, generation headers and idempotent write receipts.
+Product step IDs remain stable when reordered. Mutations atomically validate relationships
+and reject stale versions. No manufacturing master-record deletion is exposed.
+
+Data survives browser refreshes and application restarts while the same emulator data remains.
+Resetting or stopping an ephemeral emulator can erase it. SalesTrackr backups do **not** include
+manufacturing data. ProductTrackr has independent backup/restore at
+`/manufacturing/settings?tab=recovery`. Its portable ZIP contains every master entity, product
+step, supplier link, manufacturing record, copied route/progress, activity event, numbering
+counter, write receipt and workspace preference, including unused directory entries.
+Credentials, environment configuration and backup catalogs are excluded. Configuration uses
+`PRODUCTTRACKR_*` variables and request identity uses `X-ProductTrackr-*` headers.
+
+By default, archives stay under `DEMO_DATA_DIR\producttrackr-backups\<workspace-hash>` on this
+computer. They survive emulator resets but are not uploaded to Drive. Configure the separate
+ProductTrackr Drive root as follows:
+
+```powershell
+$env:PRODUCTTRACKR_BACKUP_STORAGE = "local"
+$env:PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID = "1CptlMKXkdMOBgdQ-lnAlJA-yG7fSD6L3"
+```
+
+An explicit `PRODUCTTRACKR_BACKUP_STORAGE=drive` uses `ProductTrackr / Backups` under that root with
+`PRODUCTTRACKR_DRIVE_TOKEN_JSON`, or the existing `GOOGLE_TOKEN_JSON` when no separate credential
+is configured. A separate credential leaves SalesTrackr's authorization unchanged. Inject it
+from its protected file into the process environment; never commit OAuth JSON. Drive storage
+never falls back to local storage on failure. Folder access must be verified separately. The folder cannot be a SalesTrackr data
+or backup folder, and public/whole-domain sharing is rejected. Only ZIPs tagged
+`app=producttrackr-backup` are managed; unrelated files are never rotated. Archives are readable,
+not encrypted. The existing root ID stays the same when renamed, so no environment-variable
+ID change is needed. The app creates stable **Products** and **Backups** subfolders, preserving
+their reserved IDs in the root's app-private properties. Existing managed backup ZIPs in the
+root move into Backups without changing their IDs or contents; unrelated files stay untouched.
+The directory spreadsheet remains directly in ProductTrackr, not inside Backups.
+
+**Product drawings & files** are available from each product page's **Open Drive folder** link.
+When `PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID` and either Drive credential are set, adding a product
+automatically creates its own folder under `ProductTrackr / Products`. Opening its page also
+reconnects or retries that same folder. A Drive outage never rolls back the saved product;
+creation returns a `folderWarning` and its product page offers a retry. This is a real Drive
+connection even when ZIP backups are local. With no Drive configuration, the page explains
+how to enable files rather than creating a local imitation.
+Existing app-managed product folders directly under the root are moved into Products while
+retaining their folder IDs and contents. Folders initially use `Part number - Product name`
+(or the product name alone). Their stable
+Drive IDs, workspace/product tags and workspace-level `productFolders` mapping prevent duplicate
+folders across refreshes, concurrent opens, lost responses and restores in the same workspace.
+Changing a product's name or part number also updates its Drive folder title to
+`Part number - Product name`, preserving the same folder ID, link and existing files.
+If Drive is unavailable, the product edit remains saved and its page can retry the title update.
+If a linked folder was moved, deleted or made inaccessible, restore its location/access;
+the application does not silently create a replacement. The root's name is left unchanged.
+Backup ZIPs and spreadsheet downloads use ProductTrackr names. No sharing permissions are changed.
+
+Upload drawings, specifications and other files directly in Drive. ZIP backups do **not**
+contain these files, and restore/record cleanup never deletes them. New ZIPs include
+`product-folders.json`, with each connected product's folder ID, URL, parent and original workspace/root.
+Existing workspace-level folder mappings are never replaced by a restore. Verified restored
+copies reconnect missing mappings when the product's files are opened, preserving the original
+folder ID; matching Drive tags remain a fallback. Older ZIPs without folder links still restore.
+Keep the same configured project, database, workspace and Drive root when recovering.
+
+Manual and pre-restore backups share one ten-copy retention limit. Rotation follows successful
+read-back verification; failed backups retain older recovery copies. No weekly scheduler is
+configured. Restore accepts a selected archive or uploaded ProductTrackr ZIP, validates all
+relationships/history/checksums, and requires an expiring preview plus typed `RESTORE`.
+SalesTrackr archives are rejected. Current state is first backed up and verified, the restored
+dataset is staged and read back, then the live pointer/generation switches atomically.
+Stale forms cannot save; completed retries reconcile the original operation. Archived datasets
+are deleted only when their exact contents match a physically verified pre-restore backup.
+Existing flat local collections require no up-front migration.
+
+**Settings > Record cleanup** removes only selected completed manufacturing jobs
+(up to 50 per page). Active and cancelled jobs are protected; no automatic deletion
+runs. Type `DELETE` to confirm. Cleanup first creates and physically verifies a full
+workspace backup, then removes each selected job, its copied route, activity events
+and corresponding action receipts. Shared directories, product-process links and
+the manufacturing numbering counter are unchanged. One small deletion-protection
+receipt remains per removed job, preventing old create retries from resurrecting it.
+Existing backup ZIPs can still contain deleted jobs until ten-copy rotation removes
+them; recovery requires a full workspace restore, not a per-job undo.
+
+Interrupted cleanup is persisted and can be resumed from the same Settings tab,
+including after restarting the app. Writes, new backups and restores are fenced
+until a partially completed cleanup finishes. Every deletion batch is checked
+against its verified backup and current dataset/maintenance ownership. This frees
+database storage, not a configured application RAM limit. SalesTrackr is unaffected.
+
+**Settings > Spreadsheet export** creates or updates one `ProductTrackr Directory.xlsx`.
+The Products-first workbook includes ordered Product operations, all Supplier links,
+Operations, Suppliers and Contacts, plus export information. Stable internal keys and
+clickable cross-sheet references preserve relationships, including primary suppliers,
+optional company contacts, repeated operations and unlinked directory entries.
+The Products sheet also includes a clickable **Drive folder** column for saved folder
+connections, including restored links. Products without a connected folder have a blank cell;
+exporting never creates folders or downloads their contents.
+Part number is the user-entered reference; internal keys disambiguate duplicate labels.
+Phone numbers and formula-like text are exported literally, not executed as formulas.
+Product operations also lists every available supplier name, with the primary marked;
+Supplier links retains one row per option. Technical key columns remain in the XLSX but
+are hidden by default. They are stable join IDs, not additional user-entered part numbers.
+
+**Open spreadsheet** opens the managed Google Drive file in a new browser tab.
+There is no in-app spreadsheet viewer. The button is enabled only after a verified
+Drive export; local-only exports keep it visible but disabled and provide a download instead. The app also explains
+the individual key columns.
+
+Local backup mode produces a downloadable workbook under
+`.local-data\producttrackr-spreadsheets` (or the configured demo data directory).
+Drive backup mode updates one app-tagged XLSX in the same configured private
+ProductTrackr folder, retaining its file ID. The workbook can be opened in Excel or
+Google Sheets; it is not a native Google Sheets document. No Sheets API or new OAuth
+scope is required. The export never updates unrelated files or changes sharing.
+Missing, moved, replaced or publicly shared managed Drive workbooks fail closed.
+An export is serialized with recovery/cleanup and verified by physical readback.
+
+The workbook is a one-way snapshot: the next export replaces all workbook contents,
+including manual edits. Manufacturing jobs, events, numbering and write receipts
+are excluded; use ZIP backups for full recovery. A report is limited to 200,000 cells
+and 32 MiB; oversized or unrepresentable values fail without truncating the report.
+No scheduled exports run, and the local preview performs no real Drive writes.
+
+Production enabling remains rejected; production manufacturing storage, identity, credentials
+and scheduler provisioning still require a separately reviewed cutover.
+
+After building the frontend, run real manufacturing browser checks with the emulator running:
+
+```powershell
+Set-Location frontend
+npm exec -- playwright test --config=playwright.manufacturing.config.ts
+```
+
+The manufacturing suite starts its own server on port 8014 and uses a unique demo workspace.
+The standard browser suite continues to work without an emulator; its workspace-layout tests
+mock only the manufacturing read endpoints.
+
 ## Deployment status
 
 The application and deployment assets are implemented. Local API/browser checks run without cloud credentials. Actual Drive access, an image build with Docker/Cloud Build, and an IAP-protected cloud deployment require your Google project and credentials and are **not** implied by local demo success. Review the local UI before deployment.

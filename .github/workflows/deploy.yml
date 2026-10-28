@@ -14,6 +14,7 @@ on:
       - 'backend/**'
       - 'frontend/**'
       - 'scripts/**'
+      - 'producttrackr.production.json'
   workflow_dispatch:
 
 permissions:
@@ -87,6 +88,9 @@ jobs:
       - name: Check real Firestore backup and recovery UI
         working-directory: frontend
         run: npx playwright test --config playwright.firestore.config.ts --reporter=line
+      - name: Check ProductTrackr directory, files and backup UI
+        working-directory: frontend
+        run: npx playwright test --config playwright.manufacturing.config.ts --reporter=line
 
   deploy:
     name: Deploy production
@@ -133,20 +137,31 @@ jobs:
         id: deploy
         env:
           IMAGE: ${{ steps.image.outputs.image }}
+          PRODUCTTRACKR_ADMIN_EMAILS: ${{ vars.PRODUCTTRACKR_ADMIN_EMAILS }}
         run: |
           gcloud run services describe "$CLOUD_RUN_SERVICE" --region="$GCP_REGION" --format=json > "$RUNNER_TEMP/service-before.json"
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
+          from scripts.producttrackr_deploy import production_environment
           service = json.loads((Path(os.environ["RUNNER_TEMP"]) / "service-before.json").read_text())
           assert service["metadata"]["annotations"].get("run.googleapis.com/iap-enabled") == "true", "IAP must be enabled before deployment."
+          expected = production_environment(os.environ["GCP_PROJECT_ID"], service, os.environ.get("PRODUCTTRACKR_ADMIN_EMAILS", ""))
+          folder = Path(os.environ["RUNNER_TEMP"])
+          (folder / "producttrackr-expected.json").write_text(json.dumps(expected))
+          values = {key: item["value"] for key, item in expected.items() if "value" in item}
+          (folder / "producttrackr-env.txt").write_text("^|^" + "|".join(f"{key}={value}" for key, value in values.items()))
+          secret = expected["PRODUCTTRACKR_DRIVE_TOKEN_JSON"]["valueFrom"]["secretKeyRef"]
+          (folder / "producttrackr-secret.txt").write_text(f"PRODUCTTRACKR_DRIVE_TOKEN_JSON={secret['name']}:{secret['key']}")
           PY
           digest="$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           gcloud run services update "$CLOUD_RUN_SERVICE" \
             --region="$GCP_REGION" \
             --image="${IMAGE%:*}@${digest}" \
+            --update-env-vars="$(cat "$RUNNER_TEMP/producttrackr-env.txt")" \
+            --update-secrets="$(cat "$RUNNER_TEMP/producttrackr-secret.txt")" \
             --min=0 --max=1 --min-instances=0 --max-instances=1 \
             --quiet
           gcloud run services describe "$CLOUD_RUN_SERVICE" --region="$GCP_REGION" --format=json > "$RUNNER_TEMP/service-after.json"
@@ -161,7 +176,9 @@ jobs:
           new_spec = after["spec"]["template"]["spec"]
           old_env = {item["name"]: item for item in old_spec["containers"][0]["env"]}
           new_env = {item["name"]: item for item in new_spec["containers"][0]["env"]}
-          assert old_env == new_env, "Runtime settings or secret references changed."
+          expected = json.loads((folder / "producttrackr-expected.json").read_text())
+          assert {key: item for key, item in old_env.items() if key not in expected} == {key: item for key, item in new_env.items() if key not in expected}, "SalesTrackr runtime settings or secret references changed."
+          assert all(new_env.get(key) == item for key, item in expected.items()), "ProductTrackr runtime settings or secret reference do not match."
           assert old_spec["serviceAccountName"] == new_spec["serviceAccountName"], "Runtime identity changed."
           assert after["metadata"]["annotations"].get("run.googleapis.com/iap-enabled") == "true", "IAP is not enabled."
           assert after["metadata"]["annotations"].get("run.googleapis.com/maxScale") == "1", "Service instance limit changed."
@@ -176,7 +193,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"url={url}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write(f"### SalesTrackr deployed\n\n[Open the app]({url})\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\nThe existing Drive folder, secret references, runtime identity, and IAP protection were retained.\n")
+              output.write(f"### SalesTrackr and ProductTrackr deployed\n\n[Open SalesTrackr]({url}) | [Open ProductTrackr]({url}/manufacturing)\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\nSalesTrackr's existing settings, secret references, runtime identity, and IAP protection were retained. ProductTrackr shares the database but uses its own workspace, Drive root and pinned OAuth secret.\n")
           PY
       - name: Confirm anonymous access is blocked
         env:

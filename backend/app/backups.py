@@ -286,6 +286,8 @@ class LocalBackupStore:
 
 
 class DriveBackupStore:
+    app = "salestrackr-backup"
+
     def __init__(self, settings):
         self.backend = DriveBackend(settings.token_json, settings.root_id, operator=True)
         self.folder_id = settings.backup_folder_id
@@ -392,7 +394,7 @@ class DriveBackupStore:
         self.backend._execute(self.backend._api().files().create(
             body={
                 "id": file_id, "name": name, "parents": [self._folder()],
-                "appProperties": {"app": "salestrackr-backup"},
+                "appProperties": {"app": self.app},
             },
             media_body=media, fields="id",
         ))
@@ -403,6 +405,10 @@ class DriveBackupStore:
 
 
 class BackupManager:
+    archive = staticmethod(archive)
+    read_archive = staticmethod(read_archive)
+    backup_row = staticmethod(backup_row)
+
     def __init__(self, repo, settings, store=None):
         self.repo, self.settings = repo, settings
         self.store = store or (
@@ -455,11 +461,11 @@ class BackupManager:
                 if row and row.get("verified") and checksum != row["archiveHash"]:
                     warning = True
                     continue
-                _, manifest = read_archive(data)
+                _, manifest = self.read_archive(data)
                 if manifest.get("legacy"):
                     manifest["createdAt"] = item["createdAt"]
                 value = {
-                    **backup_row(item["id"], data, manifest, name=item["name"]),
+                    **self.backup_row(item["id"], data, manifest, name=item["name"]),
                     "archiveHash": checksum, "providerChecksum": item["checksum"],
                     "verified": True, "pruned": False,
                 }
@@ -534,6 +540,9 @@ class BackupManager:
             raise Problem("Restore identifier was used for different content.", 409, "write_id_reused")
         return prior["result"]
 
+    def check_backup_control(self, control):
+        pass
+
     def _lease(self, operation_id, actor, source, restore_write_id=None):
         owner = uuid4().hex
         operation = self.repo.workspace.collection("backupOperations").document(operation_id)
@@ -546,6 +555,7 @@ class BackupManager:
                 raise Problem("Backup identifier was used for another request.", 409, "write_id_reused")
             if prior and prior.get("completed"):
                 return prior, None
+            self.check_backup_control(control)
             maintenance = control.get("maintenance")
             if maintenance and not (
                 source == "pre-restore" and maintenance["writeId"] == restore_write_id
@@ -603,7 +613,7 @@ class BackupManager:
                 operation.update({"fileId": file_id})
             data = self.store.read(file_id)
             if data is not None:
-                _, manifest = read_archive(data)
+                _, manifest = self.read_archive(data)
                 if (
                     manifest.get("operationId") != operation_id or manifest.get("actor") != actor
                     or manifest.get("source") != source
@@ -611,24 +621,24 @@ class BackupManager:
                     raise Problem("The prior backup does not match this operation.", 409, "backup_changed")
             else:
                 revisions, control = self.repo.snapshot()
-                data, manifest = archive(
+                data, manifest = self.archive(
                     revisions, source=source, operation_id=operation_id, actor=actor, control=control,
                 )
                 if len(data) > MAX_ARCHIVE:
                     raise Problem("The backup exceeds the 64 MiB archive limit.", 413, "backup_size")
-                row = backup_row(file_id, data, manifest)
+                row = self.backup_row(file_id, data, manifest)
                 self.store.put(file_id, data, row["name"])
             downloaded = self.store.read(file_id)
             if downloaded != data:
                 raise Problem("Backup readback failed. Existing backups were retained.", 503, "backup_verify")
-            read_archive(downloaded)
+            self.read_archive(downloaded)
             lease = self.repo.workspace.get().to_dict().get("backupLease") or {}
             if lease.get("owner") != owner:
                 raise Problem(
                     "The backup is still being reconciled. Retry the same request.", 503, "backup_busy"
                 )
             row = {
-                **backup_row(file_id, data, manifest),
+                **self.backup_row(file_id, data, manifest),
                 "archiveHash": hashlib.sha256(data).hexdigest(), "verified": True, "pruned": False,
                 "providerChecksum": hashlib.md5(data, usedforsecurity=False).hexdigest(),
             }
@@ -668,7 +678,7 @@ class BackupManager:
 
     def inspect(self, data, actor, row=None):
         self.require_admin(actor)
-        revisions, manifest = read_archive(data)
+        revisions, manifest = self.read_archive(data)
         with self.repo.lock:
             self.repo.sync()
             control = self.repo.control.copy()
@@ -695,17 +705,20 @@ class BackupManager:
                 "This backup contains existing conflicts, which will remain available for review."
             )
         return {
-            "token": self._token(value), "backup": row or backup_row("uploaded-backup", data, manifest),
+            "token": self._token(value), "backup": row or self.backup_row("uploaded-backup", data, manifest),
             "generation": control["generation"], "warnings": warnings,
             "expiresAt": datetime.fromtimestamp(value["expires"], timezone.utc).isoformat(),
         }
+
+    def archived_metadata(self, recovery):
+        return {}
 
     def restore(self, data, actor, token, confirmation, write_id):
         self.require_admin(actor)
         identifier(write_id)
         if confirmation != "RESTORE":
             raise Problem("Type RESTORE to confirm full-workspace recovery.", 422, "restore_confirmation")
-        revisions, manifest = read_archive(data)
+        revisions, manifest = self.read_archive(data)
         archive_hash = hashlib.sha256(data).hexdigest()
         operation = self.repo.workspace.collection("restoreOperations").document(write_id)
         owner = uuid4().hex
@@ -786,7 +799,9 @@ class BackupManager:
                     "restored": True, "generation": target.id, "counts": manifest["counts"],
                     "recoveryBackup": recovery,
                 }
-                transaction.set(old, {"state": "archived", "archivedAt": now()}, merge=True)
+                transaction.set(old, {
+                    "state": "archived", "archivedAt": now(), **self.archived_metadata(recovery),
+                }, merge=True)
                 transaction.set(target, {"state": "active", "activatedAt": now()}, merge=True)
                 transaction.set(self.repo.workspace, updated)
                 transaction.update(operation, {"completed": True, "result": result})

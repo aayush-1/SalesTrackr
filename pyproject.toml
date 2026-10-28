@@ -10,6 +10,7 @@ dependencies = [
   "google-auth>=2.38,<3",
   "google-auth-oauthlib>=1.2,<2",
   "google-cloud-firestore>=2.23,<3",
+  "openpyxl>=3.1,<4",
   "pyjwt[crypto]>=2.10,<3",
   "requests>=2.32,<3",
   "tzdata>=2025.1",
