@@ -34,6 +34,7 @@ def workbook(data, identity):
             {
                 **{kind: data[kind] if kind in KINDS else {} for kind in FILES},
                 "settings": {"weeklyEnabled": True},
+                **({"productFolders": data["productFolders"]} if "productFolders" in data else {}),
             }
         )
     except Problem:
@@ -123,7 +124,11 @@ def workbook(data, identity):
                     cell.data_type = "s"
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
                 if target:
-                    cell.hyperlink = Hyperlink(ref=cell.coordinate, location=target)
+                    cell.hyperlink = (
+                        Hyperlink(ref=cell.coordinate, target=target)
+                        if target.startswith("https://")
+                        else Hyperlink(ref=cell.coordinate, location=target)
+                    )
                     cell.font = Font(color="245B85", underline="single")
                 if index == 1:
                     cell.font = Font(bold=True, color="FFFFFF")
@@ -138,7 +143,10 @@ def workbook(data, identity):
 
     sheet(
         "Products",
-        ["Part number", "Product", "Operations (in order)", "Process", "Notes", "Product key"],
+        [
+            "Part number", "Product", "Operations (in order)", "Process",
+            "Notes", "Drive folder", "Product key",
+        ],
         [
             [
                 product["reference"],
@@ -151,9 +159,11 @@ def workbook(data, identity):
                 if product["stepIds"]
                 else "No operations",
                 product["notes"],
+                (folder["url"], folder["url"]) if folder else "",
                 product["id"],
             ]
             for product in ordered["products"]
+            for folder in [data.get("productFolders", {}).get("folders", {}).get(product["id"])]
         ],
     )
     sheet(
@@ -649,6 +659,7 @@ class SpreadsheetExport:
                     if size > MAX_BYTES:
                         raise Problem("The directory snapshot exceeds 32 MiB.", 413, "spreadsheet_size")
                     data[kind][row.id] = value
+            data["productFolders"] = self.repo.product_folders(data["products"])
             control = self.repo.workspace.get().to_dict()
             self._guard(control, owner)
             identity = {

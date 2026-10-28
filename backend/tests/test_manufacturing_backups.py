@@ -14,6 +14,7 @@ from backend.app.backups import archive as sales_archive
 from backend.app.domain import Problem
 from backend.app.manufacturing_backups import (
     FILES,
+    PRODUCT_FOLDERS_FILE,
     ManufacturingBackupManager,
     ManufacturingDriveBackupStore,
     archive,
@@ -99,12 +100,77 @@ def test_archive_includes_unlinked_masters_all_links_jobs_history_counters_and_r
     assert manifest["counts"]["manufacturingRecords"] == 2
     assert manifest["counts"]["manufacturingRecordEvents"] == 5
     with zipfile.ZipFile(io.BytesIO(downloaded.content)) as zipped:
-        assert set(zipped.namelist()) == {"manifest.json", "workspace-settings.json", *FILES.values()}
+        assert set(zipped.namelist()) == {
+            "manifest.json", "workspace-settings.json", PRODUCT_FOLDERS_FILE, *FILES.values(),
+        }
         assert b"\n  " in zipped.read("products.json")
     status = client.get("/api/manufacturing/settings/backup-recovery").json()
     assert status["provider"] == "local" and status["retention"] == 10
     assert len(status["backups"]) == 1
     assert client.get("/api/settings/backup-recovery").json()["backups"] == []
+
+
+def test_legacy_backups_without_product_folder_links_still_restore(process):
+    client, settings, product, *_ = process
+    repo = ManufacturingRepository(settings)
+    original, control = repo.snapshot()
+    original.pop("productFolders")
+    content, manifest = archive(
+        original, source="manual", operation_id=uuid4().hex, actor="local-demo", control=control,
+    )
+    assert manifest["version"] == 1
+    assert read_archive(content)[0] == original
+    create(client, "products", name="Not present in the legacy backup")
+    manager = ManufacturingBackupManager(repo, settings)
+    preview = manager.inspect(content, "local-demo")
+    result = manager.restore(content, "local-demo", preview["token"], "RESTORE", uuid4().hex)
+    assert result["restored"] is True
+    assert client.get("/api/manufacturing/products").json()["items"][0]["id"] == product["id"]
+    restored, _ = ManufacturingRepository(settings).snapshot()
+    assert restored.pop("productFolders")["folders"] == {}
+    assert restored == original
+
+
+@pytest.mark.parametrize("damage", ["url", "unknown-product", "duplicate-folder", "missing-root"])
+def test_invalid_product_folder_links_are_rejected(process, damage):
+    client, settings, product, *_ = process
+    other = create(client, "products", name="Other product")
+    data, _ = ManufacturingRepository(settings).snapshot()
+    mapping = {
+        "id": "original-product-folder", "parentId": "manufacturing-products",
+        "url": "https://drive.google.com/drive/folders/original-product-folder",
+    }
+    data["productFolders"]["rootId"] = "manufacturing-root"
+    folders = data["productFolders"]["folders"]
+    folders[product["id"]] = mapping
+    if damage == "url":
+        mapping["url"] = "https://example.invalid/untrusted"
+    elif damage == "unknown-product":
+        folders[uuid4().hex] = folders.pop(product["id"])
+    elif damage == "duplicate-folder":
+        folders[other["id"]] = mapping.copy()
+    else:
+        data["productFolders"]["rootId"] = ""
+    with pytest.raises(Problem, match="consistent"):
+        checked_data(data)
+
+
+def test_product_folder_file_is_checksum_verified_before_restore(process):
+    client, _, *_ = process
+    saved = backup(client)
+    original = client.get(f"/api/manufacturing/backups/{saved['id']}/download").content
+    damaged = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(damaged, "w") as target:
+        for item in source.infolist():
+            value = source.read(item.filename)
+            if item.filename == PRODUCT_FOLDERS_FILE:
+                value += b" "
+            target.writestr(item.filename, value)
+    response = client.post(
+        "/api/manufacturing/backups/inspect", content=damaged.getvalue(),
+        headers={**headers(client), "Content-Type": "application/zip"},
+    )
+    assert response.status_code == 422
 
 
 def test_full_restore_is_atomic_fences_old_forms_preserves_sales_and_retries_once(process):

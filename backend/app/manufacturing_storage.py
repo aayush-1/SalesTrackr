@@ -34,6 +34,10 @@ class ManufacturingRepository:
             credentials=AnonymousCredentials() if settings.mode == "demo" else None,
         )
         self.workspace = self.client.collection("workspaces").document(settings.manufacturing_workspace)
+        self.product_folder_context = {
+            "identity": settings.manufacturing_identity(self.workspace.id),
+            "rootId": settings.manufacturing_backup_folder_id,
+        }
         self.lock = RLock()
         self.signing_key = secrets.token_bytes(32)
         try:
@@ -148,7 +152,7 @@ class ManufacturingRepository:
         from .manufacturing_backups import FILES, RESERVED
         from .storage import encode
 
-        allowed = set(FILES) | (RESERVED if target.path == self.workspace.path else set())
+        allowed = set(FILES) | (RESERVED if target.path == self.workspace.path else {"productFolders"})
         if any(collection.id not in allowed for collection in target.collections()):
             raise Problem(
                 "An unknown ProductTrackr collection cannot be omitted from a backup.", 409, "backup_schema",
@@ -164,6 +168,32 @@ class ManufacturingRepository:
                 data[kind][snapshot.id] = value
         return data
 
+    def restored_product_folder(self, product_id):
+        if self.control["activeDataset"] == "legacy":
+            return None
+        descriptor = self.dataset.get().to_dict()
+        if descriptor.get("productFolders") != self.product_folder_context:
+            return None
+        return self.dataset.collection("productFolders").document(product_id).get().to_dict()
+
+    def product_folders(self, products):
+        folders = {}
+        if self.control["activeDataset"] != "legacy":
+            descriptor = self.dataset.get().to_dict()
+            if descriptor.get("productFolders") == self.product_folder_context:
+                folders = {
+                    row.id: row.to_dict()
+                    for row in self.dataset.collection("productFolders").stream()
+                    if row.id in products
+                }
+        for row in self.workspace.collection("productFolders").stream():
+            if row.id in products:
+                mapping = row.to_dict()
+                folders[row.id] = {
+                    **mapping, "url": f"https://drive.google.com/drive/folders/{mapping['id']}",
+                }
+        return {**self.product_folder_context, "folders": folders}
+
     def snapshot(self):
         from .manufacturing_backups import checked_data
 
@@ -176,6 +206,7 @@ class ManufacturingRepository:
             if before["generation"] != self.control["generation"]:
                 raise Problem("ProductTrackr changed. Reload before backing up.", 409, "workspace_changed")
             data = self.export_at(self.dataset, {"weeklyEnabled": before.get("weeklyEnabled", True)})
+            data["productFolders"] = self.product_folders(data["products"])
             after = self.workspace.get().to_dict()
             if all(before[key] == after[key] for key in ("generation", "sequence")):
                 checked_data(data)
@@ -191,10 +222,20 @@ class ManufacturingRepository:
 
         checked_data(data)
         target = self.workspace.collection("datasets").document(uuid4().hex)
-        target.set({"state": "staging", "createdAt": now()})
+        folder_data = data.get("productFolders")
+        target.set({
+            "state": "staging", "createdAt": now(),
+            **({"productFolders": {
+                key: value for key, value in folder_data.items() if key != "folders"
+            }} if folder_data is not None else {}),
+        })
         batch, count, size = self.client.batch(), 0, 0
-        for kind in FILES:
-            for key, value in data[kind].items():
+        collections = {kind: data[kind] for kind in FILES}
+        if folder_data is not None:
+            # Stage recovery copies, never replace the workspace's live folder mappings.
+            collections["productFolders"] = folder_data["folders"]
+        for kind, rows in collections.items():
+            for key, value in rows.items():
                 length = len(encode(value))
                 if count and (count >= 100 or size + length > 3 * 1024 * 1024):
                     batch.commit()
@@ -204,6 +245,13 @@ class ManufacturingRepository:
         if count:
             batch.commit()
         actual = self.export_at(target, data["settings"])
+        if folder_data is not None:
+            actual["productFolders"] = {
+                **target.get().to_dict()["productFolders"],
+                "folders": {
+                    row.id: row.to_dict() for row in target.collection("productFolders").stream()
+                },
+            }
         checked_data(actual)
         if actual != data:
             raise Problem(

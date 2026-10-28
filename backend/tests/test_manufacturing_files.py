@@ -1,4 +1,5 @@
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from unittest.mock import Mock, patch
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.domain import Problem
 from backend.app.main import create_app
+from backend.app.manufacturing_backups import read_archive
 from backend.app.manufacturing_storage import ManufacturingRepository
 from backend.tests.test_manufacturing import app as app
 from backend.tests.test_manufacturing import command, create
@@ -174,6 +176,66 @@ def test_restore_keeps_files_and_moved_folders_fail_without_creating_replacement
     ManufacturingRepository(settings).workspace.collection("productFolders").document(product["id"]).delete()
     assert folder(client, product, 409)["error"]["code"] == "product_folder_changed"
     assert files.create.call_count == 2
+
+
+def test_backed_up_links_recover_missing_mappings_without_drive_search(configured_app, drive):
+    client, settings = configured_app
+    store, rows, files = drive
+    product = create(client, "products", name="Recover original folder")
+    first = folder(client, product)
+    saved = backup(client)
+    content = client.get(f"/api/manufacturing/backups/{saved['id']}/download").content
+    data, manifest = read_archive(content)
+    assert manifest["version"] == 2
+    links = data["productFolders"]
+    assert links["identity"] == settings.manufacturing_identity()
+    assert links["rootId"] == settings.manufacturing_backup_folder_id
+    assert links["folders"][product["id"]]["url"] == first["url"]
+    repo = ManufacturingRepository(settings)
+    reference = repo.workspace.collection("productFolders").document(product["id"])
+    reference.delete()
+    restore(client, saved, inspect(client, saved))
+    assert not reference.get().exists
+    recovered = ManufacturingRepository(settings)
+    assert recovered.snapshot()[0]["productFolders"] == links
+    other_root = ManufacturingRepository(replace(
+        settings, manufacturing_backup_folder_id="different-manufacturing-root",
+    ))
+    assert other_root.restored_product_folder(product["id"]) is None
+    assert other_root.product_folders(data["products"])["folders"] == {}
+    saved_again = backup(client)
+    restore(client, saved_again, inspect(client, saved_again))
+    with patch.object(store.backend, "_list", side_effect=AssertionError("Must use the saved folder ID")):
+        reopened = folder(client, product)
+    assert reopened["url"] == first["url"]
+    assert reference.get().to_dict()["id"] == first["url"].rsplit("/", 1)[-1]
+    assert len(rows) == files.create.call_count == 1
+
+
+def test_product_folder_changes_are_fenced_while_a_backup_is_running(configured_app, drive):
+    client, settings = configured_app
+    product = create(client, "products", name="Backup fencing")
+    repo = ManufacturingRepository(settings)
+    repo.workspace.update({"backupLease": {"owner": "backup-owner", "expires": time.time() + 600}})
+    result = folder(client, product, 503)
+    assert result["error"]["code"] == "backup_in_progress"
+
+
+def test_restore_preserves_newer_mappings_and_unbacked_up_recovery_links(configured_app, drive):
+    client, settings = configured_app
+    product = create(client, "products", name="Preserve both folder references")
+    saved = backup(client)
+    restore(client, saved, inspect(client, saved))
+    repo = ManufacturingRepository(settings)
+    archived = repo.dataset
+    original = archived.collection("productFolders").document(product["id"]).get().to_dict()
+    reference = repo.workspace.collection("productFolders").document(product["id"])
+    newer = {"id": "newer-product-folder", "parentId": "manufacturing-products"}
+    reference.set(newer)
+    restore(client, saved, inspect(client, saved))
+    assert reference.get().to_dict() == newer
+    assert archived.get().to_dict()["state"] == "archived"
+    assert archived.collection("productFolders").document(product["id"]).get().to_dict() == original
 
 
 def test_existing_product_folder_moves_under_products_without_changing_its_id(configured_app, drive):

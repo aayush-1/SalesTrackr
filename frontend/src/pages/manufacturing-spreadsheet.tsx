@@ -119,6 +119,7 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
         Every export replaces its contents, including any manual spreadsheet edits.</p>
       <p>Stable internal keys preserve relationships even when names or Part numbers repeat. Click the linked cells to jump
         between products, operation steps, supplier options and company contacts. Empty processes and unlinked directory entries are included.</p>
+      <p>The Products sheet includes clickable Drive-folder links where a folder is already connected. Exporting does not create folders or include their files.</p>
       <p><strong>All suppliers are included.</strong> Product operations lists every available supplier name; Supplier links
         has one row per option, with its contact and a Yes/No primary flag. Technical key columns are hidden by default.</p>
       <div className="bt-export-sheets">{labels.map(([kind, label, description]) => <div key={kind}>

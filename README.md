@@ -221,9 +221,12 @@ the application does not silently create a replacement. The root's name is left 
 Backup ZIPs and spreadsheet downloads use ProductTrackr names. No sharing permissions are changed.
 
 Upload drawings, specifications and other files directly in Drive. ZIP backups do **not**
-contain these files, and restore/record cleanup never deletes them. Folder mappings are outside
-the restored dataset; if local mappings are lost, matching Drive tags reconnect the original
-folder. Keep the same configured project, workspace and Drive root when recovering.
+contain these files, and restore/record cleanup never deletes them. New ZIPs include
+`product-folders.json`, with each connected product's folder ID, URL, parent and original workspace/root.
+Existing workspace-level folder mappings are never replaced by a restore. Verified restored
+copies reconnect missing mappings when the product's files are opened, preserving the original
+folder ID; matching Drive tags remain a fallback. Older ZIPs without folder links still restore.
+Keep the same configured project, database, workspace and Drive root when recovering.
 
 Manual and pre-restore backups share one ten-copy retention limit. Rotation follows successful
 read-back verification; failed backups retain older recovery copies. No weekly scheduler is
@@ -256,6 +259,9 @@ The Products-first workbook includes ordered Product operations, all Supplier li
 Operations, Suppliers and Contacts, plus export information. Stable internal keys and
 clickable cross-sheet references preserve relationships, including primary suppliers,
 optional company contacts, repeated operations and unlinked directory entries.
+The Products sheet also includes a clickable **Drive folder** column for saved folder
+connections, including restored links. Products without a connected folder have a blank cell;
+exporting never creates folders or downloads their contents.
 Part number is the user-entered reference; internal keys disambiguate duplicate labels.
 Phone numbers and formula-like text are exported literally, not executed as formulas.
 Product operations also lists every available supplier name, with the primary marked;

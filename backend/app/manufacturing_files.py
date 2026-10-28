@@ -1,5 +1,7 @@
 """Stable product folders in the manufacturing workspace's private Drive root."""
 
+import time
+
 from fastapi import APIRouter, Request
 from google.cloud import firestore
 
@@ -25,6 +27,8 @@ class ProductFiles:
             raise Problem("ProductTrackr changed. Reload before opening files.", 409, "workspace_changed")
         if control.get("maintenance") or control.get("pendingRecordCleanup"):
             raise Problem("Storage maintenance is in progress. Retry shortly.", 503, "maintenance")
+        if (control.get("backupLease") or {}).get("expires", 0) > time.time():
+            raise Problem("A backup is in progress. Retry shortly.", 503, "backup_in_progress")
 
     def ensure(self, product_id, workspace, generation):
         self.guard(self.repo.workspace.get().to_dict(), workspace, generation)
@@ -41,7 +45,7 @@ class ProductFiles:
         scope = digest(self.settings.manufacturing_identity(self.repo.workspace.id))[:24]
         reference = self.repo.workspace.collection("productFolders").document(product_id)
         properties = {"app": APP, "workspace": scope, "product": product_id}
-        existing = reference.get().to_dict()
+        existing = reference.get().to_dict() or self.repo.restored_product_folder(product_id)
         candidate = existing["id"] if existing else None
         if not candidate:
             # Find moved/trashed folders too, so lost local mappings do not create replacements.

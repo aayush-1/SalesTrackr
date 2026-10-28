@@ -5,9 +5,11 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from backend.app.domain import Problem
+from backend.app.main import create_app
 from backend.app.manufacturing_backups import ManufacturingBackupManager
 from backend.app.manufacturing_spreadsheet import (
     MIME,
@@ -198,6 +200,43 @@ def test_empty_workspace_exports_headers_without_seeding_entities(app):
     book, _ = download(client)
     assert all(book[title].max_row == 1 for title in book.sheetnames[:-1])
     assert not ManufacturingRepository(settings).snapshot()[0]["products"]
+
+
+def test_products_sheet_contains_clickable_drive_links_before_and_after_restore(app):
+    _, settings = app
+    configured = replace(settings, manufacturing_backup_folder_id="manufacturing-root")
+    with TestClient(create_app(configured)) as client:
+        product = create(client, "products", name="Product with drawings", reference="PART-042")
+        unconnected = create(client, "products", name="Product without a folder")
+        repo = ManufacturingRepository(configured)
+        reference = repo.workspace.collection("productFolders").document(product["id"])
+        reference.set({"id": "original-product-folder", "parentId": "manufacturing-products"})
+        expected = "https://drive.google.com/drive/folders/original-product-folder"
+
+        def check_links():
+            with patch("backend.app.manufacturing_files.ManufacturingDriveBackupStore") as drive:
+                export(client)
+                drive.assert_not_called()
+            book, _ = download(client)
+            products = {row["Product key"]: row for row in rows(book, "Products")}
+            assert products[product["id"]]["Drive folder"] == expected
+            assert products[unconnected["id"]]["Drive folder"] is None
+            page = book["Products"]
+            column = next(cell.column for cell in page[1] if cell.value == "Drive folder")
+            row = next(
+                index for index, value in enumerate(rows(book, "Products"), 2)
+                if value["Product key"] == product["id"]
+            )
+            assert page.cell(row, column).hyperlink.target == expected
+            assert page.cell(row, column).hyperlink.location is None
+            assert page.cell(row, column).data_type == "s"
+
+        check_links()
+        saved = backup(client)
+        reference.delete()
+        restore(client, saved, inspect(client, saved))
+        check_links()
+        assert not reference.get().exists
 
 
 def test_authorization_csrf_and_workspace_fencing_precede_export(process):

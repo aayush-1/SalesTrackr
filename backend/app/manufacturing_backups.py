@@ -47,6 +47,7 @@ RESERVED = {
 }
 HASH = re.compile(r"^[a-f0-9]{64}$")
 NUMBER = re.compile(r"^MFG-[0-9]{5,}$")
+PRODUCT_FOLDERS_FILE = "product-folders.json"
 
 
 def validate_value(schema, value):
@@ -184,7 +185,7 @@ def checked_record(record, collections):
 def checked_data(data):
     try:
         if (
-            set(data) != {*FILES, "settings"}
+            set(data) - {"productFolders"} != {*FILES, "settings"}
             or data["settings"]
             != {
                 "weeklyEnabled": data["settings"]["weeklyEnabled"],
@@ -201,6 +202,31 @@ def checked_data(data):
                     raise ValueError("Invalid document.")
                 if kind not in ("sequences", "writes", "manufacturingRecordEvents"):
                     entity_metadata(key, row)
+        if "productFolders" in data:
+            folders = data["productFolders"]
+            if (
+                set(folders) != {"identity", "rootId", "folders"}
+                or set(folders["identity"]) != {"project", "database", "workspace"}
+                or not isinstance(folders["folders"], dict)
+                or set(folders["folders"]) - set(data["products"])
+            ):
+                raise ValueError("Invalid product folder mappings.")
+            for value in folders["identity"].values():
+                validate_value(Name, value)
+            if folders["rootId"]:
+                identifier(folders["rootId"])
+            elif folders["rootId"] != "" or folders["folders"]:
+                raise ValueError("Product folders require their original Drive root.")
+            ids = set()
+            for key, mapping in folders["folders"].items():
+                identifier(key)
+                if set(mapping) != {"id", "parentId", "url"} or mapping["id"] in ids:
+                    raise ValueError("Invalid or duplicate product folder.")
+                identifier(mapping["id"])
+                identifier(mapping["parentId"])
+                if mapping["url"] != f"https://drive.google.com/drive/folders/{mapping['id']}":
+                    raise ValueError("Invalid product folder URL.")
+                ids.add(mapping["id"])
         for kind, model in MODELS.items():
             for row in data[kind].values():
                 if not set(model.model_fields).issubset(row):
@@ -321,13 +347,16 @@ def checked_data(data):
 
 def archive(data, *, source, operation_id, actor, control):
     counts = checked_data(data)
+    names = {**FILES, "settings": "workspace-settings.json"}
+    if "productFolders" in data:
+        names["productFolders"] = PRODUCT_FOLDERS_FILE
     files = {
         name: json.dumps(data[kind], ensure_ascii=False, indent=2).encode()
-        for kind, name in {**FILES, "settings": "workspace-settings.json"}.items()
+        for kind, name in names.items()
     }
     manifest = {
         "format": "producttrackr-backup",
-        "version": 1,
+        "version": 2 if "productFolders" in data else 1,
         "createdAt": now(),
         "source": source,
         "operationId": operation_id,
@@ -356,7 +385,10 @@ def read_archive(content):
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive_file:
             entries = archive_file.infolist()
-            expected = {"manifest.json", "workspace-settings.json", *FILES.values()}
+            names = {**FILES, "settings": "workspace-settings.json"}
+            if PRODUCT_FOLDERS_FILE in archive_file.namelist():
+                names["productFolders"] = PRODUCT_FOLDERS_FILE
+            expected = {"manifest.json", *names.values()}
             if (
                 len(entries) != len(expected)
                 or {entry.filename for entry in entries} != expected
@@ -374,7 +406,7 @@ def read_archive(content):
             manifest = _json(archive_file.read("manifest.json"))
             if (
                 manifest["format"] != "producttrackr-backup"
-                or manifest["version"] != 1
+                or manifest["version"] != (2 if "productFolders" in names else 1)
                 or manifest["source"] not in BACKUP_SOURCES
                 or manifest["checksum"] != digest({k: v for k, v in manifest.items() if k != "checksum"})
                 or set(manifest["files"]) != expected - {"manifest.json"}
@@ -382,7 +414,7 @@ def read_archive(content):
                 raise ValueError("Invalid manifest.")
             timestamp(manifest["createdAt"])
             data = {}
-            for kind, name in {**FILES, "settings": "workspace-settings.json"}.items():
+            for kind, name in names.items():
                 raw = archive_file.read(name)
                 if hashlib.sha256(raw).hexdigest() != manifest["files"][name]:
                     raise ValueError("File checksum mismatch.")
@@ -591,6 +623,8 @@ class ManufacturingBackupManager(BackupManager):
                 "Current ProductTrackr data is backed up and verified before "
                 "the restored dataset is activated.",
                 "SalesTrackr data, settings and backups are not changed.",
+                "Saved product Drive links reconnect only in their original workspace and Drive root. "
+                "Drawings and files stay in Drive and are not restored from the ZIP.",
                 "All open ProductTrackr forms must be reloaded after recovery.",
             ],
         }
@@ -665,13 +699,31 @@ class ManufacturingBackupManager(BackupManager):
                 if manifest["dataHash"] != descriptor["backupDataHash"]:
                     continue
                 target = self.repo.workspace if snapshot.id == "legacy" else snapshot.reference
-                if self.repo.export_at(target, saved["settings"]) != saved:
+                if self.repo.export_at(target, saved["settings"]) != {
+                    key: value for key, value in saved.items() if key != "productFolders"
+                }:
                     continue
+                if target.path != self.repo.workspace.path:
+                    folder_context = descriptor.get("productFolders")
+                    if folder_context is not None:
+                        backed_up = saved.get("productFolders") or {}
+                        if folder_context != {
+                            key: value for key, value in backed_up.items() if key != "folders"
+                        } or any(
+                            backed_up.get("folders", {}).get(row.id) != row.to_dict()
+                            for row in target.collection("productFolders").stream()
+                        ):
+                            continue
                 references = [
                     document.reference
                     for kind in FILES
                     for document in target.collection(kind).select([]).stream()
                 ]
+                if target.path != self.repo.workspace.path:
+                    references.extend(
+                        document.reference
+                        for document in target.collection("productFolders").select([]).stream()
+                    )
                 for start in range(0, len(references) + 1, 100):
 
                     @firestore.transactional

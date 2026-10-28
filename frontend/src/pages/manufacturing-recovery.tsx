@@ -167,7 +167,7 @@ function RecoveryControls({ initial }: { initial: RecoveryStatus }) {
         <button className="text-button" disabled={locked} onClick={refresh}><RefreshCw size={14} />Refresh backup status</button>
       </div>
       <p>One portable ZIP includes every Product, Operation, Supplier and Contact; all process steps and supplier links; manufacturing records with their copied operations and progress; complete activity history, number counters, write receipts and workspace preferences.</p>
-      <p>Drawings and files in product Drive folders are not included in ZIP backups. Restoring this workspace or cleaning up jobs does not delete those files.</p>
+      <p>ZIP backups include saved product Drive-folder links, but not the drawings and files themselves. Links reconnect in the same workspace and Drive root. Restoring this workspace or cleaning up jobs does not delete those files.</p>
       <p>Keep the <strong>{settings.retention} newest verified backups total</strong>, including manual and pre-restore copies. Older copies rotate out only after a new backup is verified. No original is permanently protected.</p>
       <p className="help-text">Backups run manually and before restores. No automatic or weekly scheduler is configured. ZIP files contain readable JSON and are not encrypted; keep them private. Credentials and environment configuration are never included.</p>
       <dl className="backup-summary"><div><dt>Backup storage</dt><dd>{settings.location}</dd></div><div><dt>Last verified backup</dt><dd>{dateTime(settings.lastBackupAt)}</dd></div></dl>
