@@ -23,9 +23,7 @@ class Settings:
     manufacturing_enabled: bool = False
     manufacturing_project: str = ""
     manufacturing_workspace: str = "producttrackr"
-    manufacturing_backup_folder_id: str = ""
     manufacturing_backup_storage: str = "local"
-    manufacturing_token_json: str = ""
     manufacturing_database: str = "(default)"
     manufacturing_admins: tuple[str, ...] = ()
 
@@ -40,6 +38,12 @@ class Settings:
         emulator = os.getenv("FIRESTORE_EMULATOR_HOST", "")
         if self.manufacturing_workspace == self.firestore_workspace:
             raise RuntimeError("ProductTrackr must use a separate workspace from SalesTrackr.")
+        if (
+            self.storage_backend != "firestore"
+            or self.manufacturing_project != self.firestore_project
+            or self.manufacturing_database != self.firestore_database
+        ):
+            raise RuntimeError("Shared recovery requires both workspaces in the same Firestore database.")
         if self.mode == "demo":
             if (
                 os.getenv("K_SERVICE")
@@ -55,15 +59,10 @@ class Settings:
             raise RuntimeError("Production ProductTrackr requires a Firestore project and database.")
         if self.manufacturing_backup_storage != "drive":
             raise RuntimeError("Production ProductTrackr requires Drive backups; local storage is forbidden.")
-        if (
-            not self.manufacturing_backup_folder_id
-            or self.manufacturing_backup_folder_id in (self.root_id, self.backup_folder_id)
-        ):
-            raise RuntimeError(
-                "Production ProductTrackr requires its own Drive root, separate from SalesTrackr."
-            )
-        if not self.manufacturing_token_json:
-            raise RuntimeError("Production ProductTrackr requires PRODUCTTRACKR_DRIVE_TOKEN_JSON.")
+        if not self.root_id or self.root_id == self.backup_folder_id:
+            raise RuntimeError("ProductTrackr requires the SalesTrackr Drive root, not its Backups folder.")
+        if not self.token_json:
+            raise RuntimeError("Shared Drive storage requires GOOGLE_TOKEN_JSON.")
         if not (self.manufacturing_admins or self.recovery_admins):
             raise RuntimeError("Production ProductTrackr requires PRODUCTTRACKR_ADMIN_EMAILS.")
 
@@ -96,9 +95,7 @@ class Settings:
             manufacturing_enabled=os.getenv("PRODUCTTRACKR_ENABLED", "").lower() == "true",
             manufacturing_project=os.getenv("PRODUCTTRACKR_FIRESTORE_PROJECT_ID", ""),
             manufacturing_workspace=os.getenv("PRODUCTTRACKR_WORKSPACE_ID", "producttrackr"),
-            manufacturing_backup_folder_id=os.getenv("PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID", ""),
             manufacturing_backup_storage=os.getenv("PRODUCTTRACKR_BACKUP_STORAGE", "local"),
-            manufacturing_token_json=os.getenv("PRODUCTTRACKR_DRIVE_TOKEN_JSON", ""),
             manufacturing_database=os.getenv("PRODUCTTRACKR_FIRESTORE_DATABASE_ID", "(default)"),
             manufacturing_admins=tuple(
                 email.strip().casefold()

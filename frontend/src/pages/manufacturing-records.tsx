@@ -37,17 +37,17 @@ function RecordTable({ records }: { records: ManufacturingRecordSummary[] }) {
     <th>Record / product</th><th>Current operation</th><th>Responsible supplier</th><th>Progress</th><th>Status</th><th>Updated</th>
   </tr></thead><tbody>{records.map(record => <tr key={record.id}>
     <td><Link className="record-title" to={recordLink(record.id)}>{record.number}</Link>
-      <Link className="cell-sub" to={productLink(record.productId)}>{record.productName}</Link><span className="cell-sub">{record.productReference || 'No part number'}</span></td>
+      <Link className="cell-sub" to={productLink(record.productId)}>{record.productName}</Link><span className="cell-sub">{record.productPartNumber || 'No part number'}</span></td>
     <td>{record.currentOperationName || 'All operations completed'}</td>
-    <td>{record.currentPartnerId ? <><Link to={`/manufacturing/partners/${record.currentPartnerId}`}>{record.currentPartnerName}</Link>
+    <td>{record.currentSupplierId ? <><Link to={`/manufacturing/suppliers/${record.currentSupplierId}`}>{record.currentSupplierName}</Link>
       {record.currentContactName && <span className="cell-sub">{record.currentContactName}</span>}</>
       : <span className="muted">{record.status === 'ready' ? 'Awaiting assignment' : 'Not assigned'}</span>}</td>
     <td><Progress record={record} /></td><td><Status status={record.status} /></td>
     <td>{new Date(record.updatedAt).toLocaleDateString()}</td>
   </tr>)}</tbody></table></div>;
 }
-export function ConnectedManufacturingRecords({ productId, partnerId, overview = false }: { productId?: string; partnerId?: string; overview?: boolean }) {
-  const query = new URLSearchParams({ view: productId ? 'all' : 'active', ...(productId ? { productId } : {}), ...(partnerId ? { partnerId } : {}) });
+export function ConnectedManufacturingRecords({ productId, supplierId, overview = false }: { productId?: string; supplierId?: string; overview?: boolean }) {
+  const query = new URLSearchParams({ view: productId ? 'all' : 'active', ...(productId ? { productId } : {}), ...(supplierId ? { supplierId } : {}) });
   const resource = useManufacturingResource<ManufacturingRecordPage>(`/records?${query}&limit=5`);
   const title = productId ? 'Manufacturing records' : overview ? 'Current work' : 'Current manufacturing work';
   return <section className="panel bt-directory"><div className="bt-panel-heading"><h2>{title}</h2>
@@ -56,7 +56,7 @@ export function ConnectedManufacturingRecords({ productId, partnerId, overview =
     {resource.loading ? <Loading /> : resource.data && (resource.data.items.length ? <RecordTable records={resource.data.items} />
       : <Empty title={productId ? 'No manufacturing records yet' : 'No work in process'}
         text={productId ? 'Start a record to track a real job through a copy of this process.' : 'New jobs will appear here once a manufacturing record is created.'}
-        action={!partnerId && <Link className="button" to={`/manufacturing/records/new${productId ? `?productId=${productId}` : ''}`}><Plus size={15} />New manufacturing record</Link>} />)}
+        action={!supplierId && <Link className="button" to={`/manufacturing/records/new${productId ? `?productId=${productId}` : ''}`}><Plus size={15} />New manufacturing record</Link>} />)}
   </section>;
 }
 
@@ -69,10 +69,10 @@ export function ManufacturingRecordsPage() {
   const view = views.includes(rawView) ? rawView : 'active';
   const offset = Math.max(0, Math.floor(Number(params.get('offset')) || 0));
   const search = params.get('search') || '';
-  const productId = params.get('productId') || '', partnerId = params.get('partnerId') || '', operationId = params.get('operationId') || '';
-  const products = useManufacturingDirectory('products'), partners = useManufacturingDirectory('partners'), operations = useManufacturingDirectory('operations');
+  const productId = params.get('productId') || '', supplierId = params.get('supplierId') || '', operationId = params.get('operationId') || '';
+  const products = useManufacturingDirectory('products'), suppliers = useManufacturingDirectory('suppliers'), operations = useManufacturingDirectory('operations');
   const query = new URLSearchParams({ view, search, offset: String(offset), limit: '50',
-    ...(productId ? { productId } : {}), ...(partnerId ? { partnerId } : {}), ...(operationId ? { operationId } : {}) });
+    ...(productId ? { productId } : {}), ...(supplierId ? { supplierId } : {}), ...(operationId ? { operationId } : {}) });
   const resource = useManufacturingResource<ManufacturingRecordPage>(`/records?${query}`);
   const change = (key: string, value: string) => {
     const next = new URLSearchParams(pendingParams.current); value ? next.set(key, value) : next.delete(key);
@@ -90,13 +90,13 @@ export function ManufacturingRecordsPage() {
         <button className="icon-button" aria-label="Refresh manufacturing records" onClick={refresh}><RefreshCw size={17} /></button></div>
       <div className="bt-record-filters">
         <select aria-label="Filter records by product" value={productId} onChange={e => change('productId', e.target.value)} disabled={products.loading}>
-          <option value="">All products</option>{products.items.map(p => <option key={p.id} value={p.id}>{p.name}{(p as Product).reference ? ` · ${(p as Product).reference}` : ''}</option>)}</select>
+          <option value="">All products</option>{products.items.map(p => <option key={p.id} value={p.id}>{p.name}{(p as Product).partNumber ? ` · ${(p as Product).partNumber}` : ''}</option>)}</select>
         <select aria-label="Filter records by operation" value={operationId} onChange={e => change('operationId', e.target.value)} disabled={operations.loading}>
           <option value="">All current operations</option>{operations.items.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-        <select aria-label="Filter records by supplier" value={partnerId} onChange={e => change('partnerId', e.target.value)} disabled={partners.loading}>
-          <option value="">All current suppliers</option>{partners.items.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        <select aria-label="Filter records by supplier" value={supplierId} onChange={e => change('supplierId', e.target.value)} disabled={suppliers.loading}>
+          <option value="">All current suppliers</option>{suppliers.items.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
       </div>
-      {(resource.error || products.error || operations.error || partners.error) && <Alert>{resource.error || products.error || operations.error || partners.error}</Alert>}
+      {(resource.error || products.error || operations.error || suppliers.error) && <Alert>{resource.error || products.error || operations.error || suppliers.error}</Alert>}
       {resource.loading ? <Loading /> : resource.data && (resource.data.items.length ? <RecordTable records={resource.data.items} />
         : <Empty title="No manufacturing records in this view" text="Create a job from a saved Product process, or try another view or filter." />)}
       {resource.data && <div className="bt-pagination"><span>{resource.data.total} manufacturing records</span><div>
@@ -132,10 +132,10 @@ export function NewManufacturingRecordPage() {
     <TrackedForm className="panel details-panel bt-new-record" onSubmit={submit}>
       {(save.error || products.error) && <Alert>{save.error || products.error}</Alert>}
       <div className="form-grid"><Field label="Product process" wide><select required disabled={products.loading || locked} value={productId} onChange={e => setProduct(e.target.value)}>
-        <option value="">Select a product</option>{products.items.map(p => <option key={p.id} value={p.id}>{p.name}{(p as Product).reference ? ` · ${(p as Product).reference}` : ''}</option>)}</select></Field>
+        <option value="">Select a product</option>{products.items.map(p => <option key={p.id} value={p.id}>{p.name}{(p as Product).partNumber ? ` · ${(p as Product).partNumber}` : ''}</option>)}</select></Field>
         <Field label="Job notes" wide><textarea rows={3} maxLength={10000} placeholder="Drawing reference, job instructions or internal notes..." value={notes} disabled={locked} onChange={e => setNotes(e.target.value)} /></Field></div>
       {preview.loading && productId ? <Loading /> : preview.error ? <Alert>{preview.error} <Link to={productLink(productId)}>Open Product process</Link></Alert> : source ? <>
-        <div className="bt-panel-heading"><div><h2>Copied operation route</h2><p className="muted">{source.process.productName} · Part number: {source.process.productReference || 'Not added'}</p></div>
+        <div className="bt-panel-heading"><div><h2>Copied operation route</h2><p className="muted">{source.process.productName} · Part number: {source.process.productPartNumber || 'Not added'}</p></div>
           <button type="button" className="icon-button" aria-label="Reload process preview" disabled={locked} onClick={refresh}><RefreshCw size={17} /></button></div>
         <ol className="bt-route-preview">{source.process.operations.map((step, index) => <li key={step.sourceStepId}>
           <span className="bt-step-number">{String(index + 1).padStart(2, '0')}</span><div><strong>{step.name}</strong>
@@ -154,7 +154,7 @@ export function NewManufacturingRecordPage() {
 }
 
 function Responsibility({ assignment }: { assignment: WorkAssignment }) {
-  return <div className="bt-work-responsibility"><Link to={`/manufacturing/partners/${assignment.partnerId}`}>{assignment.partnerName}</Link>
+  return <div className="bt-work-responsibility"><Link to={`/manufacturing/suppliers/${assignment.supplierId}`}>{assignment.supplierName}</Link>
     <span>{assignment.type === 'individual' ? 'Independent individual' : assignment.relationship === 'internal' ? 'In-house company' : 'Company supplier'}</span>
     {assignment.contact && <><Link to={`/manufacturing/contacts/${assignment.contact.id}`}>{assignment.contact.name}</Link>
       <small>{[assignment.contact.designation, assignment.contact.email, assignment.contact.phone].filter(Boolean).join(' · ')}</small></>}
@@ -168,12 +168,12 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
 }) {
   const record = detail.record, current = record.currentIndex === null ? null : record.operations[record.currentIndex];
   const isAssignment = action === 'assign' || action === 'reassign';
-  const existingPartner = action === 'reassign' ? current?.assignment?.partnerId || '' : '';
-  const [partnerId, setPartner] = useState(detail.eligiblePartners.some(p => p.partner.id === existingPartner) ? existingPartner : '');
-  const [contactId, setContact] = useState(partnerId && action === 'reassign' ? current?.assignment?.contact?.id || '' : '');
+  const existingSupplier = action === 'reassign' ? current?.assignment?.supplierId || '' : '';
+  const [supplierId, setSupplier] = useState(detail.eligibleSuppliers.some(p => p.supplier.id === existingSupplier) ? existingSupplier : '');
+  const [contactId, setContact] = useState(supplierId && action === 'reassign' ? current?.assignment?.contact?.id || '' : '');
   const [occurredOn, setDate] = useState(detail.today), [note, setNote] = useState(''), [reason, setReason] = useState('');
-  const partner = detail.eligiblePartners.find(p => p.partner.id === partnerId)?.partner;
-  const contacts = useManufacturingDirectory(isAssignment && partner?.type === 'company' ? 'contacts' : null, `&partnerId=${partnerId}`);
+  const supplier = detail.eligibleSuppliers.find(p => p.supplier.id === supplierId)?.supplier;
+  const contacts = useManufacturingDirectory(isAssignment && supplier?.type === 'company' ? 'contacts' : null, `&supplierId=${supplierId}`);
   const save = useManufacturingSave({ refreshOnSave: false });
   const locked = save.busy || save.unconfirmed;
   const needsReason = action === 'reassign' || action === 'undo' || action === 'cancel';
@@ -182,7 +182,7 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = event.currentTarget; form.dataset.dirty = 'true';
     const data = action === 'cancel' ? { reason } : action === 'undo' ? { reason, stepId: undoStep!.id }
-      : { stepId: current!.id, occurredOn, note, ...(isAssignment ? { partnerId, contactId: contactId || null } : {}), ...(needsReason ? { reason } : {}) };
+      : { stepId: current!.id, occurredOn, note, ...(isAssignment ? { supplierId, contactId: contactId || null } : {}), ...(needsReason ? { reason } : {}) };
     const result = save.unconfirmed ? await save.retry() : await save.save(`/records/${record.id}/${action}`, data, record.version, record.id);
     if (result) { markFormSaved(form); onSaved(); }
   };
@@ -194,12 +194,12 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
       {action === 'undo' && <Alert tone="warning">Reopen only this last completed operation with its recorded supplier. The earlier completion stays in history.</Alert>}
       <div className="form-grid">{isAssignment && <>
         <Field label="Responsible supplier" wide hint="Only suppliers currently linked to this source Product operation can be selected.">
-          <select required disabled={locked} value={partnerId} onChange={event => { setPartner(event.target.value); setContact(''); }}>
-            <option value="">Choose a linked supplier</option>{detail.eligiblePartners.map(choice => <option key={choice.partner.id} value={choice.partner.id}>
-              {choice.partner.name}{choice.primary ? ' · Suggested primary' : ''}{choice.partner.relationship === 'internal' ? ' (in-house)' : choice.partner.type === 'individual' ? ' (individual)' : ''}
+          <select required disabled={locked} value={supplierId} onChange={event => { setSupplier(event.target.value); setContact(''); }}>
+            <option value="">Choose a linked supplier</option>{detail.eligibleSuppliers.map(choice => <option key={choice.supplier.id} value={choice.supplier.id}>
+              {choice.supplier.name}{choice.primary ? ' · Suggested primary' : ''}{choice.supplier.relationship === 'internal' ? ' (in-house)' : choice.supplier.type === 'individual' ? ' (individual)' : ''}
             </option>)}</select>
         </Field>
-        {partner?.type === 'company' && <Field label="Company contact (optional)" wide><select value={contactId} disabled={locked || contacts.loading || !!contacts.error} onChange={e => setContact(e.target.value)}>
+        {supplier?.type === 'company' && <Field label="Company contact (optional)" wide><select value={contactId} disabled={locked || contacts.loading || !!contacts.error} onChange={e => setContact(e.target.value)}>
           <option value="">No contact selected</option>{contacts.items.map(contact => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select></Field>}
       </>}
         {(isAssignment || action === 'complete') && <>
@@ -209,7 +209,7 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
         </>}
         {needsReason && <Field label="Reason" wide><textarea required rows={3} maxLength={10000} value={reason} disabled={locked} onChange={e => setReason(e.target.value)} /></Field>}
       </div>
-      <div className="form-actions"><SaveButton busy={save.busy} disabled={!save.unconfirmed && (isAssignment && (!partnerId || contacts.loading || !!contacts.error))}>
+      <div className="form-actions"><SaveButton busy={save.busy} disabled={!save.unconfirmed && (isAssignment && (!supplierId || contacts.loading || !!contacts.error))}>
         {save.unconfirmed ? 'Retry same save' : actionLabels[action]}
       </SaveButton></div>
     </TrackedForm>
@@ -219,8 +219,8 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
 function HistoryEntry({ event }: { event: ManufacturingRecordEvent }) {
   return <li><span className="bt-history-dot" /><div><strong>{event.action === 'create' ? 'Record created' : actionLabels[event.action]}</strong>
     {event.operationName && <span className="cell-sub">{event.operationName}</span>}
-    {event.previousAssignment && <p>Previous responsibility: {event.previousAssignment.partnerName}{event.previousAssignment.contact ? ` · ${event.previousAssignment.contact.name}` : ''}</p>}
-    {event.assignment && <p>Supplier: {event.assignment.partnerName}{event.assignment.contact ? ` · ${event.assignment.contact.name}` : ''}</p>}
+    {event.previousAssignment && <p>Previous responsibility: {event.previousAssignment.supplierName}{event.previousAssignment.contact ? ` · ${event.previousAssignment.contact.name}` : ''}</p>}
+    {event.assignment && <p>Supplier: {event.assignment.supplierName}{event.assignment.contact ? ` · ${event.assignment.contact.name}` : ''}</p>}
     {event.occurredOn && <p>Actual work date: {workDate(event.occurredOn)}</p>}
     {event.previousCompletedOn && <p>Corrected completion date: {workDate(event.previousCompletedOn)}</p>}
     {(event.reason || event.note) && <p className="bt-text">{event.reason || event.note}</p>}
@@ -253,11 +253,11 @@ function RecordDetailContent({ detail, error, refreshing }: { detail: Manufactur
   const open = (action: ManufacturingRecordAction) => setDialog({ action, detail, undoStep });
   return <>
     <Back to="/manufacturing/records">Manufacturing records</Back>
-    <PageHeader eyebrow="PRODUCTTRACKR / MANUFACTURING RECORD" title={record.number} description={`${record.productName}${record.productReference ? ` · ${record.productReference}` : ''}`}
+    <PageHeader eyebrow="PRODUCTTRACKR / MANUFACTURING RECORD" title={record.number} description={`${record.productName}${record.productPartNumber ? ` · ${record.productPartNumber}` : ''}`}
       action={<div className="bt-record-actions"><Link className="button" to={productLink(record.productId)}>Product process<ArrowRight size={15} /></Link>
         <button className="icon-button" aria-label="Refresh manufacturing record" disabled={refreshing} onClick={refresh}><RefreshCw size={17} /></button></div>} />
     {error && <Alert>{error}</Alert>}
-    <section className="panel bt-record-summary"><div><Status status={record.status} /><p>{record.productName} · Part number: {record.productReference || 'Not added'}</p></div>
+    <section className="panel bt-record-summary"><div><Status status={record.status} /><p>{record.productName} · Part number: {record.productPartNumber || 'Not added'}</p></div>
       <Progress record={record} /><div className="bt-record-dates"><span>First started <strong>{workDate(record.startedOn)}</strong></span>
         {record.completedOn && <span>Completed <strong>{workDate(record.completedOn)}</strong></span>}</div></section>
     {record.notes && <section className="panel details-panel bt-record-notes"><h2>Job notes</h2><p className="bt-text">{record.notes}</p></section>}
@@ -282,12 +282,12 @@ function RecordDetailContent({ detail, error, refreshing }: { detail: Manufactur
           <h2>{current?.name || 'All operations complete'}</h2><Status status={record.status} />
           {current?.assignment ? <Responsibility assignment={current.assignment} /> : record.status === 'ready' && <p>No supplier has started this operation.</p>}
           {record.status === 'ready' && <>
-            {(detail.eligibilityError || !detail.eligiblePartners.length) && <Alert tone="warning">{detail.eligibilityError || 'No suppliers are linked to this source operation yet.'} Add a supplier in the <Link to={`${productLink(record.productId)}#step-${current!.sourceStepId}`}>Product process</Link>, then refresh this record.</Alert>}
-            <button className="button primary full" disabled={refreshing || !!detail.eligibilityError || !detail.eligiblePartners.length} onClick={() => open('assign')}>Assign & start<ArrowRight size={15} /></button>
+            {(detail.eligibilityError || !detail.eligibleSuppliers.length) && <Alert tone="warning">{detail.eligibilityError || 'No suppliers are linked to this source operation yet.'} Add a supplier in the <Link to={`${productLink(record.productId)}#step-${current!.sourceStepId}`}>Product process</Link>, then refresh this record.</Alert>}
+            <button className="button primary full" disabled={refreshing || !!detail.eligibilityError || !detail.eligibleSuppliers.length} onClick={() => open('assign')}>Assign & start<ArrowRight size={15} /></button>
           </>}
           {record.status === 'in_progress' && <div className="bt-current-actions"><button className="button primary full" disabled={refreshing} onClick={() => open('complete')}><Check size={16} />Complete operation</button>
-            <button className="button full" disabled={refreshing || !!detail.eligibilityError || !detail.eligiblePartners.length} onClick={() => open('reassign')}>Reassign supplier</button>
-            {(detail.eligibilityError || !detail.eligiblePartners.length) && <p className="muted">New assignments need a current linked supplier. Existing work can still be completed.</p>}
+            <button className="button full" disabled={refreshing || !!detail.eligibilityError || !detail.eligibleSuppliers.length} onClick={() => open('reassign')}>Reassign supplier</button>
+            {(detail.eligibilityError || !detail.eligibleSuppliers.length) && <p className="muted">New assignments need a current linked supplier. Existing work can still be completed.</p>}
           </div>}
           <p className="bt-record-explanation">Responsibility tracks workflow, not verified physical location or supplier acknowledgement. No notifications are sent.</p>
         </section>

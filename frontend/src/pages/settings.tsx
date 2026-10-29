@@ -1,10 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Download, ExternalLink, HardDrive, LoaderCircle, RefreshCw, Upload } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api';
 import { Alert, Field, Loading, PageHeader } from '../components';
 import type { Backup, BackupPreview, BackupSettings } from '../types';
 import { RecordCleanup } from './record-cleanup';
+import { ManufacturingContext, manufacturingApi } from '../manufacturing-api';
+import type { ManufacturingMeta } from '../manufacturing-types';
+import { ManufacturingCleanup } from './manufacturing-cleanup';
+import { ManufacturingSpreadsheet } from './manufacturing-spreadsheet';
 
 const maxArchiveSize = 64 * 1024 * 1024;
 type RestoreAttempt = { writeId: string; preview: BackupPreview; backupId: string; file: File | null };
@@ -31,12 +35,41 @@ function BackupSummary({ backup }: { backup: Backup }) {
     <div><dt>Contacts</dt><dd>{backup.counts.contact}</dd></div>
     <div><dt>Sales records</dt><dd>{backup.counts.record}</dd></div>
     <div><dt>Revisions</dt><dd>{backup.counts.revisions}</dd></div>
+    {backup.counts.products !== undefined && <div><dt>Products</dt><dd>{backup.counts.products}</dd></div>}
+    {backup.counts.manufacturingRecords !== undefined && <div><dt>Manufacturing records</dt><dd>{backup.counts.manufacturingRecords}</dd></div>}
   </dl>;
+}
+
+function ManufacturingSettingsPanel({ children }: { children: ReactNode }) {
+  const [meta, setMeta] = useState<ManufacturingMeta | null>(null);
+  const [error, setError] = useState('');
+  const [version, setVersion] = useState(0);
+  const [workspaceChanged, setWorkspaceChanged] = useState(false);
+  const refresh = useCallback(() => setVersion(value => value + 1), []);
+  const noteWorkspaceChange = useCallback(() => setWorkspaceChanged(true), []);
+  useEffect(() => {
+    const controller = new AbortController();
+    manufacturingApi<ManufacturingMeta>('/meta', { signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) setMeta(value); })
+      .catch(reason => { if (!controller.signal.aborted) setError(message(reason)); });
+    return () => controller.abort();
+  }, []);
+  if (error) return <Alert>{error}</Alert>;
+  if (!meta) return <Loading />;
+  return <ManufacturingContext.Provider value={{ meta, version, refresh, workspaceChanged, noteWorkspaceChange }}>
+    {workspaceChanged && <Alert>The manufacturing workspace changed. Reload Settings before continuing.</Alert>}
+    {children}
+  </ManufacturingContext.Provider>;
 }
 
 export function Settings() {
   const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') === 'general' ? 'general' : params.get('tab') === 'cleanup' ? 'cleanup' : 'backup';
+  const tabs = [
+    ['general', 'General'], ['backup', 'Backup and recovery'], ['sales-cleanup', 'Sales record cleanup'],
+    ['manufacturing-cleanup', 'Manufacturing record cleanup'], ['spreadsheet', 'Products spreadsheet export'],
+  ];
+  const selected = params.get('tab') === 'cleanup' ? 'sales-cleanup' : params.get('tab');
+  const tab = tabs.some(([id]) => id === selected) ? selected : 'general';
   const [settings, setSettings] = useState<BackupSettings | null>(null);
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -51,20 +84,30 @@ export function Settings() {
     return () => controller.abort();
   }, [version]);
   return <>
-    <PageHeader eyebrow="WORKSPACE PREFERENCES" title="Settings" description="Manage your workspace storage, backups and recovery."
+    <PageHeader eyebrow="SALESTRACKR + PRODUCTTRACKR" title="Settings" description="One place for shared storage, backup and recovery, record cleanup and product exports."
       action={<button className="button" disabled={loading} onClick={() => setVersion(value => value + 1)}><RefreshCw size={16} />Refresh backup status</button>} />
     <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-      <button role="tab" id="general-tab" aria-controls="general-panel" aria-selected={tab === 'general'} onClick={() => setParams({ tab: 'general' })}>General</button>
-      <button role="tab" id="backup-tab" aria-controls="backup-panel" aria-selected={tab === 'backup'} onClick={() => setParams({ tab: 'backup' })}>Backup and recovery</button>
-      <button role="tab" id="cleanup-tab" aria-controls="cleanup-panel" aria-selected={tab === 'cleanup'} onClick={() => setParams({ tab: 'cleanup' })}>Record cleanup</button>
+      {tabs.map(([id, label]) => <button key={id} role="tab" id={`${id}-tab`} aria-controls={`${id}-panel`}
+        aria-selected={tab === id} onClick={() => setParams({ tab: id })}>{label}</button>)}
     </div>
-    {tab === 'cleanup' && <div role="tabpanel" id="cleanup-panel" aria-labelledby="cleanup-tab"><RecordCleanup demo={settings?.mode === 'demo'} /></div>}
+    {tab === 'sales-cleanup' && <div role="tabpanel" id="sales-cleanup-panel" aria-labelledby="sales-cleanup-tab"><RecordCleanup demo={settings?.mode === 'demo'} /></div>}
+    {(tab === 'manufacturing-cleanup' || tab === 'spreadsheet') && <div role="tabpanel" id={`${tab}-panel`} aria-labelledby={`${tab}-tab`}>
+      {settings?.manufacturingEnabled ? <ManufacturingSettingsPanel>
+        {tab === 'manufacturing-cleanup' ? <ManufacturingCleanup /> : <ManufacturingSpreadsheet />}
+      </ManufacturingSettingsPanel> : settings && <Alert>ProductTrackr is not configured in this environment.</Alert>}
+    </div>}
     {loadError && <Alert>{loadError} Retry using Refresh backup status. Loading status does not start a backup or restore.</Alert>}
     {loading && !settings && <Loading />}
     {settings && <>
       <section className="panel details-panel settings-section" role="tabpanel" id="general-panel" aria-labelledby="general-tab" hidden={tab !== 'general'}>
-        <h2>Workspace storage</h2>
-        <p>{settings.mode === 'demo' ? 'This local demo simulates storage and recovery. It is not connected to Google Drive.' : settings.storageBackend === 'firestore' ? 'Firestore is the live workspace database. Backups are portable ZIP files containing plain JSON.' : 'This workspace currently uses Google Drive storage. Firestore migration is not enabled.'}</p>
+        <h2>Shared workspace settings</h2>
+        {settings.includesManufacturing ? <><p>One backup includes both Trackrs. Recovery restores both together, including product folder links and full history.</p>
+          <dl><dt>Drive root</dt><dd>SalesTrackr</dd><dt>Combined backups</dt><dd>SalesTrackr / Backups</dd>
+            <dt>Product files</dt><dd>SalesTrackr / Products / Part number - Product name</dd>
+            <dt>Products spreadsheet</dt><dd>SalesTrackr / ProductTrackr Directory.xlsx</dd></dl>
+        </> : <Alert tone="warning">ProductTrackr is not available in this environment.</Alert>}
+        <h3>Workspace storage</h3>
+        <p>{settings.mode === 'demo' ? 'This local demo simulates storage and recovery. It is not connected to Google Drive.' : settings.storageBackend === 'firestore' ? 'Your records are saved online. Backups are stored in Google Drive.' : 'Your records are stored in Google Drive.'}</p>
         <dl><dt>Backup location</dt><dd>{settings.location}</dd><dt>Workspace mode</dt><dd>{settings.mode === 'demo' ? 'Local simulation — Google Drive is not connected' : 'Private production workspace'}</dd></dl>
       </section>
       <div role="tabpanel" id="backup-panel" aria-labelledby="backup-tab" hidden={tab !== 'backup'}>
@@ -103,7 +146,7 @@ function BackupRecovery({ settings, onSettings }: { settings: BackupSettings; on
       if (inFlight.current || pendingBackup || pendingRestore) { event.preventDefault(); event.returnValue = ''; }
     };
     const navigate = (event: MouseEvent) => {
-      const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null;
+      const anchor = event.target instanceof Element ? event.target.closest('a[href], [role="tab"]') : null;
       if (anchor && !anchor.hasAttribute('download') && (inFlight.current || pendingBackup || pendingRestore)) {
         event.preventDefault(); event.stopImmediatePropagation();
         setError('Keep this page open until the current operation is confirmed. Retry the same operation if its response was interrupted.');
@@ -213,6 +256,8 @@ function BackupRecovery({ settings, onSettings }: { settings: BackupSettings; on
       </div>
       <p>Portable, plain ZIP archives containing JSON. {demo ? 'Created locally for preview only.' : 'Saved directly to your private Drive folder, without a browser download step.'} These archives are not encrypted; keep them private.</p>
       <p>New backups contain readable <code>accounts.json</code>, <code>contacts.json</code> and <code>sales-records.json</code>. Each includes current data and full revision history. The manifest records backup details, counts and integrity checks.</p>
+      {settings.includesManufacturing && <p><strong>Both Trackrs are included.</strong> The combined ZIP contains <code>salestrackr.zip</code> and <code>producttrackr.zip</code>, with a verified shared manifest. Product data, process links, manufacturing jobs, activity history and Drive-folder links are included. Actual Drive drawings/files stay in Drive.</p>}
+      {settings.includesManufacturing && <p>Separate legacy backups are left untouched. This recovery page accepts only combined backups so restoring one Trackr cannot erase the other. Existing verified product-folder connections take precedence over recovered copies.</p>}
       <dl className="backup-summary"><div><dt>Backup location</dt><dd>{settings.location}</dd></div><div><dt>Last backup</dt><dd>{dateTime(settings.lastBackupAt)}</dd></div></dl>
       {settings.lastError && <Alert>Last backup error: {settings.lastError}</Alert>}
       <button className="button primary" disabled={!!busy || disabled || !settings.canBackup || restoreUnconfirmed} onClick={() => void createBackup()}><HardDrive size={16} />{backupUnconfirmed ? 'Retry same backup' : demo ? 'Create simulated backup' : 'Back up now to Drive'}</button>
@@ -236,19 +281,22 @@ function BackupRecovery({ settings, onSettings }: { settings: BackupSettings; on
     </section>
     <section className="panel details-panel settings-section" aria-label="Restore workspace">
       <h2>Restore workspace</h2>
-      <Alert tone="warning">Full rollback, not a merge. All current accounts, contacts, sales records and revision history will be replaced by the selected backup. Changes made after that backup will no longer be live.</Alert>
+      <Alert tone="warning">Full rollback, not a merge. {settings.includesManufacturing ? 'BOTH SalesTrackr and ProductTrackr will be replaced: accounts, contacts, sales records, products, operations, suppliers, manufacturing jobs, folder links and all history.' : 'All current accounts, contacts, sales records and revision history will be replaced by the selected backup.'} Changes made after that backup will no longer be live.</Alert>
       <p>The server saves current state as a pre-restore recovery backup, stages and verifies the restored data, then switches the live workspace atomically. After confirmed success this page reloads to discard old forms.</p>
       {!demo && <p>Selecting a Drive backup fetches and validates that archive on the server when you preview it. Nothing is restored until you explicitly confirm.</p>}
       <div className="form-grid restore-selection">
         <Field label={demo ? 'Choose a simulated backup' : 'Choose a Drive backup'}><select value={backupId} disabled={locked || disabled || !settings.canRestore} onChange={event => {
           setBackupId(event.target.value); setFile(null); if (input.current) input.current.value = ''; clearPreview();
         }}><option value="">Select an archive</option>{settings.backups.map(backup => <option key={backup.id} value={backup.id}>{backup.name} · {source(backup)}</option>)}</select></Field>
-        <Field label="Or upload a ZIP or legacy JSON archive" hint="Plain .zip or validated legacy .json. Maximum file size: 64 MiB (compressed for ZIP). The server validates archive contents.">
-          <input ref={input} type="file" accept=".zip,.json,application/zip,application/json" disabled={locked || disabled || !settings.canRestore} onChange={event => {
+        <Field label={settings.includesManufacturing ? 'Or upload a combined ZIP archive' : 'Or upload a ZIP or legacy JSON archive'} hint={`${settings.includesManufacturing ? 'Complete combined .zip only.' : 'Plain .zip or validated legacy .json.'} Maximum file size: 64 MiB. The server validates archive contents.`}>
+          <input ref={input} type="file" accept={settings.includesManufacturing ? '.zip,application/zip' : '.zip,.json,application/zip,application/json'} disabled={locked || disabled || !settings.canRestore} onChange={event => {
             clearPreview(); setFile(null); setBackupId('');
             const selected = event.target.files?.[0];
             if (!selected) return;
-            if (!/\.(zip|json)$/i.test(selected.name)) { setError('Choose a .zip or legacy .json backup archive.'); event.target.value = ''; return; }
+            if (!(settings.includesManufacturing ? /\.zip$/i : /\.(zip|json)$/i).test(selected.name)) {
+              setError(settings.includesManufacturing ? 'Choose a combined .zip backup archive.' : 'Choose a .zip or legacy .json backup archive.');
+              event.target.value = ''; return;
+            }
             if (selected.size > maxArchiveSize) { setError('Backup archive exceeds the 64 MiB file size limit.'); event.target.value = ''; return; }
             setFile(selected);
           }} />

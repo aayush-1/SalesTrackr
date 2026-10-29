@@ -1,15 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Link, NavLink, Outlet, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, NavLink, Outlet, useSearchParams } from 'react-router-dom';
 import { ArrowRight, ClipboardList, Factory, LayoutDashboard, Menu, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon } from 'lucide-react';
 import { Alert, Loading, PageHeader } from '../components';
-import { ManufacturingContext, manufacturingApi, useManufacturing, useManufacturingResource } from '../manufacturing-api';
+import { ManufacturingContext, manufacturingApi, useManufacturingResource } from '../manufacturing-api';
 import type { Directory, ManufacturingMeta, ManufacturingPage, ManufacturingRecordCounts, ManufacturingRecordView } from '../manufacturing-types';
 import { WorkspaceSwitcher } from '../workspace-switcher';
 import { directories } from './producttrackr';
 import { ConnectedManufacturingRecords } from './manufacturing-records';
-import { ManufacturingRecovery } from './manufacturing-recovery';
-import { ManufacturingCleanup } from './manufacturing-cleanup';
-import { ManufacturingSpreadsheet } from './manufacturing-spreadsheet';
 import { SupplierWorkSheet } from './supplier-work';
 
 export function ManufacturingShell() {
@@ -42,7 +39,7 @@ export function ManufacturingShell() {
       </nav>
       <div className="unit-sidebar-note"><Factory size={18} /><strong>From process to progress</strong><p>Independent jobs. Clear responsibility. One operation at a time.</p></div>
       <div className="sidebar-bottom"><div className="avatar">P</div><div><strong>ProductTrackr</strong><small>Independent workspace</small></div>
-        <NavLink to="/manufacturing/settings" className="sidebar-settings" aria-label="ProductTrackr settings" title="ProductTrackr settings" onClick={() => setOpen(false)}><SettingsIcon size={17} /></NavLink>
+        <NavLink to="/settings" className="sidebar-settings" aria-label="Settings" title="Settings" onClick={() => setOpen(false)}><SettingsIcon size={17} /></NavLink>
       </div>
     </aside>
     <div className="workspace">
@@ -50,7 +47,7 @@ export function ManufacturingShell() {
       <main>
         {error ? <><Alert>{error}</Alert><button className="button" onClick={() => { setError(''); setConnection(v => v + 1); }}>Retry connection</button></>
           : !meta ? <Loading /> : <ManufacturingContext.Provider value={{ meta, version, refresh, workspaceChanged, noteWorkspaceChange }}>
-            {meta.mode === 'demo' && <div className="unit-preview-notice"><span>LOCAL PRODUCTTRACKR</span>Saved in an isolated local Firestore emulator. Sales data and backups are separate.</div>}
+            {meta.mode === 'demo' && <div className="unit-preview-notice"><span>LOCAL PRODUCTTRACKR</span>Saved in a local Firestore emulator. Shared Settings manages backup, recovery and exports.</div>}
             {workspaceChanged && <Alert>ProductTrackr was restored in another session. Old forms cannot be saved. <button className="text-button" onClick={() => window.location.reload()}>Reload ProductTrackr</button></Alert>}
             <Outlet />
           </ManufacturingContext.Provider>}
@@ -91,22 +88,10 @@ export function ManufacturingOverview() {
 }
 
 export function ManufacturingSettings() {
-  const [params, setParams] = useSearchParams();
-  const { meta } = useManufacturing();
-  const tabs = [['general', 'General'], ['records', 'Records & relationships'], ['recovery', 'Data & recovery'], ['cleanup', 'Record cleanup'], ['spreadsheet', 'Spreadsheet export']];
-  const tab = tabs.some(([id]) => id === params.get('tab')) ? params.get('tab') : 'general';
-  return <>
-    <PageHeader eyebrow="PRODUCTTRACKR / PREFERENCES" title="ProductTrackr settings" description="This workspace has its own records, identity and settings. SalesTrackr stays separate." />
-    <div className="settings-tabs" role="tablist" aria-label="ProductTrackr settings sections">{tabs.map(([id, title]) => <button key={id} role="tab" id={`unit-${id}-tab`} aria-controls={`unit-${id}-panel`} aria-selected={tab === id} onClick={() => setParams({ tab: id })}>{title}</button>)}</div>
-    <section className={['recovery', 'cleanup', 'spreadsheet'].includes(tab || '') ? '' : 'panel details-panel'} role="tabpanel" id={`unit-${tab}-panel`} aria-labelledby={`unit-${tab}-tab`}>
-      {tab === 'general' ? <><h2>Your manufacturing workspace</h2><dl className="unit-settings-summary"><div><dt>Workspace</dt><dd>ProductTrackr</dd></div>
-        <div><dt>Storage</dt><dd>{meta.mode === 'demo' ? 'Local Firestore emulator' : 'Cloud Firestore'}</dd></div><div><dt>Workspace ID</dt><dd>{meta.workspaceId}</dd></div><div><dt>SalesTrackr settings</dt><dd>Not shared</dd></div></dl></>
-        : tab === 'records' ? <><h2>Processes and manufacturing records</h2><p>Products have ordered operations and linked supplier choices, with exactly one primary when links exist. These process links do not start real work.</p>
-          <p>Each manufacturing record copies its Product route into an independent job. Operations run sequentially with one responsible supplier at a time. New assignments use the source operation's current linked suppliers. Optional contacts must belong to the selected company.</p>
-          <p>Independent people are suppliers directly. In-house work uses an internal company supplier. Reassignments, cancellations and safe completion corrections require a reason and remain in activity history.</p><div className="bt-settings-links"><Link className="button" to="/manufacturing/records">Manufacturing records<ArrowRight size={15} /></Link>{(Object.keys(directories) as Directory[]).map(kind => <Link className="button" to={`/manufacturing/${kind}`} key={kind}>{directories[kind].title}<ArrowRight size={15} /></Link>)}</div></>
-          : tab === 'cleanup' ? <ManufacturingCleanup /> : tab === 'spreadsheet' ? <ManufacturingSpreadsheet /> : <ManufacturingRecovery />}
-    </section>
-  </>;
+  const [params] = useSearchParams();
+  const legacy = params.get('tab') || 'general';
+  const tab = ({ recovery: 'backup', cleanup: 'manufacturing-cleanup', records: 'general' } as Record<string, string>)[legacy] || legacy;
+  return <Navigate replace to={`/settings?tab=${encodeURIComponent(tab)}`} />;
 }
 export function ManufacturingNotFound() {
   return <div className="empty"><h1>ProductTrackr page not found</h1><Link className="button primary" to="/manufacturing">Return to ProductTrackr<ArrowRight size={16} /></Link></div>;

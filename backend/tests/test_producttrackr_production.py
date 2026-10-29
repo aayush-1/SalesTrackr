@@ -1,4 +1,3 @@
-import json
 import os
 from copy import deepcopy
 from dataclasses import replace
@@ -26,11 +25,11 @@ def production(tmp_path, monkeypatch):
     return Settings(
         "production", tmp_path, "sales-root", "sales-token", "iap-audience",
         "https://app.example.test", False,
+        storage_backend="firestore",
         manufacturing_enabled=True, manufacturing_project="example-project",
         manufacturing_database="(default)", manufacturing_workspace="producttrackr",
         firestore_project="example-project",
-        manufacturing_backup_folder_id="producttrackr-root", manufacturing_backup_storage="drive",
-        manufacturing_token_json='{"scopes":["https://www.googleapis.com/auth/drive"]}',
+        backup_folder_id="sales-backups", manufacturing_backup_storage="drive",
         manufacturing_admins=("product-admin@example.test",),
     )
 
@@ -40,9 +39,12 @@ def production(tmp_path, monkeypatch):
     {"manufacturing_project": "demo-producttrackr"},
     {"manufacturing_database": ""},
     {"manufacturing_backup_storage": "local"},
-    {"manufacturing_backup_folder_id": ""},
-    {"manufacturing_backup_folder_id": "sales-root"},
-    {"manufacturing_token_json": ""},
+    {"root_id": ""},
+    {"root_id": "sales-backups"},
+    {"token_json": ""},
+    {"storage_backend": "drive"},
+    {"manufacturing_project": "different-project"},
+    {"manufacturing_database": "different-database"},
     {"manufacturing_admins": ()},
     {"manufacturing_workspace": "salestrackr"},
 ])
@@ -64,6 +66,7 @@ def test_production_shares_database_with_separate_workspace_and_runtime_credenti
     workspace.id = "producttrackr"
     workspace.get.return_value.to_dict.return_value = {
         "generation": "production-generation", "productSearchVersion": 1, "activeDataset": "legacy",
+        "namingVersion": 1,
     }
     with patch("backend.app.manufacturing_storage.firestore.Client", return_value=client) as factory:
         repository = ManufacturingRepository(production)
@@ -100,6 +103,8 @@ def service(**values):
         "APP_MODE": "production", "GOOGLE_FOLDER_ID": "sales-root",
         "BACKUP_DRIVE_FOLDER_ID": "sales-backups", "PUBLIC_ORIGIN": "https://app.example.test",
         "RECOVERY_ADMIN_EMAILS": "sales-admin@example.test", **values,
+        "STORAGE_BACKEND": values.get("STORAGE_BACKEND", "firestore"),
+        "FIRESTORE_PROJECT_ID": values.get("FIRESTORE_PROJECT_ID", "example-project"),
     }
     return {"spec": {"template": {"spec": {"containers": [{"env": [
         {"name": key, "value": val} for key, val in values.items()
@@ -108,17 +113,15 @@ def service(**values):
     }}]}]}}}}
 
 
-def test_deployment_overlay_is_separate_and_does_not_change_sales():
+def test_deployment_overlay_reuses_sales_storage_without_separate_drive_configuration():
     before = service()
     retained = deepcopy(before)
     result = production_environment("example-project", before, "product-admin@example.test")
     assert before == retained
     assert result["PRODUCTTRACKR_BACKUP_STORAGE"]["value"] == "drive"
     assert result["PRODUCTTRACKR_FIRESTORE_DATABASE_ID"]["value"] == "(default)"
-    assert result["PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID"]["value"] == "1CptlMKXkdMOBgdQ-lnAlJA-yG7fSD6L3"
-    assert result["PRODUCTTRACKR_DRIVE_TOKEN_JSON"]["valueFrom"]["secretKeyRef"] == {
-        "name": "producttrackr-drive-oauth", "key": "1",
-    }
+    assert "PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID" not in result
+    assert "PRODUCTTRACKR_DRIVE_TOKEN_JSON" not in result
     assert "GOOGLE_TOKEN_JSON" not in result and "GOOGLE_FOLDER_ID" not in result
     assert result["PRODUCTTRACKR_ADMIN_EMAILS"]["value"] == "product-admin@example.test"
 
@@ -126,10 +129,12 @@ def test_deployment_overlay_is_separate_and_does_not_change_sales():
 @pytest.mark.parametrize("values", [
     {"APP_MODE": "demo"},
     {"FIRESTORE_EMULATOR_HOST": "127.0.0.1:8085"},
-    {"GOOGLE_FOLDER_ID": "1CptlMKXkdMOBgdQ-lnAlJA-yG7fSD6L3"},
+    {"GOOGLE_FOLDER_ID": "sales-backups"},
+    {"STORAGE_BACKEND": "drive"},
+    {"FIRESTORE_PROJECT_ID": "another-project"},
     {"FIRESTORE_WORKSPACE_ID": "producttrackr"},
     {"RECOVERY_ADMIN_EMAILS": ""},
-    {"PRODUCTTRACKR_ENABLED": "true", "PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID": "other-product-root"},
+    {"PRODUCTTRACKR_ENABLED": "true", "PRODUCTTRACKR_WORKSPACE_ID": "other-product-workspace"},
 ])
 def test_deployment_rejects_unsafe_or_unconfigured_targets(values):
     with pytest.raises(ValueError):
@@ -137,10 +142,12 @@ def test_deployment_rejects_unsafe_or_unconfigured_targets(values):
 
 
 def test_deployment_rejects_unpinned_secret_versions():
-    config = json.loads(CONFIG.read_text())
-    config["driveSecretVersion"] = "latest"
+    existing = service()
+    existing["spec"]["template"]["spec"]["containers"][0]["env"][-1]["valueFrom"]["secretKeyRef"][
+        "key"
+    ] = "latest"
     with pytest.raises(ValueError):
-        production_environment("example-project", service(), config=config)
+        production_environment("example-project", existing)
 
 
 def test_database_rules_are_deployed_only_to_the_named_database():
@@ -195,7 +202,7 @@ def test_shared_database_product_writes_and_backups_leave_sales_workspace_unchan
     sales = FirestoreRepository(settings)
     with TestClient(create_app(settings, sales)) as client:
         before = sales.workspace.get().to_dict()
-        product = create(client, "products", name="Independent product", reference="PART-001")
+        product = create(client, "products", name="Independent product", partNumber="PART-001")
         repository = ManufacturingRepository(settings)
         manager = ManufacturingBackupManager(repository, settings)
         backup = manager.backup(uuid4().hex, "local-demo")

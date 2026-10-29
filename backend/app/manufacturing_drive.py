@@ -13,7 +13,7 @@ def require_private(backend, folder):
             fileId=folder, fields="nextPageToken,permissions(type)", pageSize=100, pageToken=token,
         ))
         if any(row["type"] in ("anyone", "domain") for row in page["permissions"]):
-            raise Problem("ProductTrackr Drive folders must remain private.", 503, "backup_permissions")
+            raise Problem("Google Drive folders must remain private.", 503, "backup_permissions")
         token = page.get("nextPageToken")
         if not token:
             return

@@ -141,6 +141,8 @@ class RecordCleanup:
                     409,
                     "cleanup_ineligible",
                 )
+            if self.recovery.settings.manufacturing_enabled:
+                self.recovery.backup(f"sales-cleanup-{digest(body.writeId)}", actor)
         owner = uuid4().hex
 
         @firestore.transactional

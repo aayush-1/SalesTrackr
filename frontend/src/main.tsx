@@ -1,6 +1,6 @@
 import { StrictMode, useCallback, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Link, Navigate, NavLink, Outlet, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, NavLink, Outlet, Route, Routes, useParams } from 'react-router-dom';
 import {
   ArchiveX, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
   Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon, Truck,
@@ -84,13 +84,20 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
   </div>;
 }
 
+function LegacySupplierRoute() {
+  const { id } = useParams();
+  return <Navigate replace to={`/manufacturing/suppliers${id ? `/${encodeURIComponent(id)}` : ''}`} />;
+}
+
 createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><Routes>
   <Route path="manufacturing" element={<ManufacturingShell />}>
     <Route index element={<ManufacturingOverview />} />
-    {(['products', 'operations', 'partners', 'contacts'] as const).map(kind => <Route key={kind}>
+    {(['products', 'operations', 'suppliers', 'contacts'] as const).map(kind => <Route key={kind}>
       <Route path={kind} element={<BuildDirectory key={kind} kind={kind} />} />
       <Route path={`${kind}/:id`} element={<BuildDetail key={kind} kind={kind} />} />
     </Route>)}
+    <Route path="partners" element={<LegacySupplierRoute />} />
+    <Route path="partners/:id" element={<LegacySupplierRoute />} />
     <Route path="records" element={<ManufacturingRecordsPage />} />
     <Route path="supplier-work" element={<SupplierWorkPage />} />
     <Route path="records/new" element={<NewManufacturingRecordPage />} />

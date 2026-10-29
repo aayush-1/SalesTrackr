@@ -19,7 +19,7 @@ from .domain import Identifier, Model, Problem, now
 from .manufacturing_backups import FILES, ManufacturingDriveBackupStore, checked_data
 from .storage import digest, encode
 
-KINDS = ("products", "operations", "partners", "contacts", "steps", "assignments")
+KINDS = ("products", "operations", "suppliers", "contacts", "steps", "assignments")
 NAME = "ProductTrackr Directory.xlsx"
 MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PATH = "/api/manufacturing/settings/spreadsheet"
@@ -45,12 +45,12 @@ def workbook(data, identity):
         ) from None
     ordered = {
         kind: sorted(data[kind].values(), key=lambda row: (row["name"].casefold(), row["id"]))
-        for kind in ("products", "operations", "partners", "contacts")
+        for kind in ("products", "operations", "suppliers", "contacts")
     }
     ordered["contacts"].sort(
         key=lambda row: (
-            data["partners"][row["partnerId"]]["name"].casefold(),
-            row["partnerId"],
+            data["suppliers"][row["supplierId"]]["name"].casefold(),
+            row["supplierId"],
             row["name"].casefold(),
             row["id"],
         )
@@ -66,7 +66,7 @@ def workbook(data, identity):
         data["assignments"].values(),
         key=lambda row: (
             step_rank[row["stepId"]],
-            data["partners"][row["partnerId"]]["name"].casefold(),
+            data["suppliers"][row["supplierId"]]["name"].casefold(),
             row["id"],
         ),
     )
@@ -75,7 +75,7 @@ def workbook(data, identity):
         for title, rows in (
             ("Products", ordered["products"]),
             ("Operations", ordered["operations"]),
-            ("Suppliers", ordered["partners"]),
+            ("Suppliers", ordered["suppliers"]),
             ("Contacts", ordered["contacts"]),
             ("Product operations", [step for _, _, step in steps]),
             ("Supplier links", assignments),
@@ -85,7 +85,7 @@ def workbook(data, identity):
     for row in assignments:
         links[row["stepId"]].append(row)
     for row in ordered["contacts"]:
-        contacts[row["partnerId"]].append(row)
+        contacts[row["supplierId"]].append(row)
 
     def ref(label, sheet, key):
         return (label, f"'{sheet}'!A{row_numbers[sheet][key]}") if key else label
@@ -149,7 +149,7 @@ def workbook(data, identity):
         ],
         [
             [
-                product["reference"],
+                product["partNumber"],
                 product["name"],
                 "\n".join(
                     f"{index}. {data['operations'][data['steps'][key]['operationId']]['name']}"
@@ -186,17 +186,17 @@ def workbook(data, identity):
         ],
         [
             [
-                product["reference"],
+                product["partNumber"],
                 ref(product["name"], "Products", product["id"]),
                 position,
                 ref(data["operations"][step["operationId"]]["name"], "Operations", step["operationId"]),
                 "\n".join(
-                    data["partners"][link["partnerId"]]["name"]
+                    data["suppliers"][link["supplierId"]]["name"]
                     + (" (primary)" if link["id"] == step["primaryAssignmentId"] else "")
                     for link in links[step["id"]]
                 ),
                 step["instructions"],
-                ref(data["partners"][primary["partnerId"]]["name"], "Suppliers", primary["partnerId"])
+                ref(data["suppliers"][primary["supplierId"]]["name"], "Suppliers", primary["supplierId"])
                 if primary
                 else "",
                 ref(data["contacts"][primary["contactId"]]["name"], "Contacts", primary["contactId"])
@@ -237,13 +237,13 @@ def workbook(data, identity):
         ],
         [
             [
-                product["reference"],
+                product["partNumber"],
                 ref(product["name"], "Products", product["id"]),
                 ref(positions[step["id"]], "Product operations", step["id"]),
                 ref(data["operations"][step["operationId"]]["name"], "Operations", step["operationId"]),
-                ref(partner["name"], "Suppliers", partner["id"]),
-                partner["type"],
-                partner["relationship"],
+                ref(supplier["name"], "Suppliers", supplier["id"]),
+                supplier["type"],
+                supplier["relationship"],
                 ref(data["contacts"][link["contactId"]]["name"], "Contacts", link["contactId"])
                 if link["contactId"]
                 else "",
@@ -252,16 +252,16 @@ def workbook(data, identity):
                 product["id"],
                 step["id"],
                 step["operationId"],
-                partner["id"],
+                supplier["id"],
                 link["contactId"] or "",
                 link["id"],
             ]
             for link in assignments
-            for product, step, partner in [
+            for product, step, supplier in [
                 (
                     data["products"][link["productId"]],
                     data["steps"][link["stepId"]],
-                    data["partners"][link["partnerId"]],
+                    data["suppliers"][link["supplierId"]],
                 )
             ]
         ],
@@ -298,7 +298,7 @@ def workbook(data, identity):
                 else "No company contacts",
                 row["id"],
             ]
-            for row in ordered["partners"]
+            for row in ordered["suppliers"]
         ],
     )
     sheet(
@@ -307,12 +307,12 @@ def workbook(data, identity):
         [
             [
                 row["name"],
-                ref(data["partners"][row["partnerId"]]["name"], "Suppliers", row["partnerId"]),
+                ref(data["suppliers"][row["supplierId"]]["name"], "Suppliers", row["supplierId"]),
                 row["designation"],
                 row["email"],
                 row["phone"],
                 row["id"],
-                row["partnerId"],
+                row["supplierId"],
             ]
             for row in ordered["contacts"]
         ],
@@ -328,7 +328,7 @@ def workbook(data, identity):
             ["Contents", "All directory entities, ordered Product operations and supplier/contact links."],
             [
                 "Relationships",
-                "Keys are stable internal IDs; Part number is the user-entered reference, not a unique key.",
+                "Keys are stable internal IDs; the user-entered Part number is not a unique key.",
             ],
             [
                 "Usage",
@@ -529,8 +529,8 @@ class SpreadsheetExport:
             "canExport": self.admin(actor),
             "name": NAME,
             "folderUrl": (
-                f"https://drive.google.com/drive/folders/{self.settings.manufacturing_backup_folder_id}"
-                if self.settings.manufacturing_backup_folder_id
+                f"https://drive.google.com/drive/folders/{self.settings.root_id}"
+                if self.settings.root_id
                 else None
             ),
             "spreadsheet": state.get("result") if matching and state.get("completed") else None,
@@ -618,7 +618,7 @@ class SpreadsheetExport:
             if (
                 self.store.provider == "drive"
                 and state.get("fileId")
-                and state.get("folderId") != self.settings.manufacturing_backup_folder_id
+                and state.get("folderId") != self.settings.root_id
             ):
                 raise Problem("The configured spreadsheet folder changed.", 409, "spreadsheet_changed")
             state = {
@@ -629,7 +629,7 @@ class SpreadsheetExport:
                 "generation": generation,
                 "completed": False,
                 "lastError": None,
-                "folderId": self.settings.manufacturing_backup_folder_id,
+                "folderId": self.settings.root_id,
             }
             transaction.update(
                 self.repo.workspace,

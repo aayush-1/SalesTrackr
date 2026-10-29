@@ -28,7 +28,7 @@
       "collectionGroup": "manufacturingRecords",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "currentPartnerId", "order": "ASCENDING"},
+        {"fieldPath": "currentSupplierId", "order": "ASCENDING"},
         {"fieldPath": "createdAt", "order": "DESCENDING"}
       ]
     },
@@ -68,7 +68,7 @@
       "collectionGroup": "contacts",
       "queryScope": "COLLECTION",
       "fields": [
-        {"fieldPath": "partnerId", "order": "ASCENDING"},
+        {"fieldPath": "supplierId", "order": "ASCENDING"},
         {"fieldPath": "nameKey", "order": "ASCENDING"}
       ]
     },

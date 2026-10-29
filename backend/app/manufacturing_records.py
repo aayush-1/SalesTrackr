@@ -19,7 +19,7 @@ SUMMARY_FIELDS = [
     "number",
     "productId",
     "productName",
-    "productReference",
+    "productPartNumber",
     "notes",
     "status",
     "active",
@@ -27,8 +27,8 @@ SUMMARY_FIELDS = [
     "stepCount",
     "currentOperationId",
     "currentOperationName",
-    "currentPartnerId",
-    "currentPartnerName",
+    "currentSupplierId",
+    "currentSupplierName",
     "currentContactName",
     "createdAt",
     "updatedAt",
@@ -47,7 +47,7 @@ class NewManufacturingRecord(Model):
 
 class WorkAssignment(Model):
     stepId: Identifier
-    partnerId: Identifier
+    supplierId: Identifier
     contactId: Identifier | None = None
     occurredOn: date | None = None
     note: Text = ""
@@ -109,7 +109,7 @@ class ManufacturingRecords:
         source = {
             "productId": product_id,
             "productName": product["name"],
-            "productReference": product["reference"],
+            "productPartNumber": product["partNumber"],
             "operations": ordered,
         }
         if len(json.dumps(source).encode()) > 700_000:
@@ -121,10 +121,10 @@ class ManufacturingRecords:
             before = self.repo.workspace.get().to_dict()
             source = self.source(product_id)
             links = self.repo.query("assignments", "productId", product_id)
-            partners = self.many("partners", [link["partnerId"] for link in links])
+            suppliers = self.many("suppliers", [link["supplierId"] for link in links])
             suggestions = {
                 step["sourceStepId"]: [
-                    partners[link["partnerId"]]["name"]
+                    suppliers[link["supplierId"]]["name"]
                     for link in links
                     if link["stepId"] == step["sourceStepId"]
                 ]
@@ -162,13 +162,13 @@ class ManufacturingRecords:
                 "completedCount": sum(s["status"] == "completed" for s in record["operations"]),
                 "currentOperationId": (current or {}).get("operationId"),
                 "currentOperationName": (current or {}).get("name"),
-                "currentPartnerId": assignment.get("partnerId"),
-                "currentPartnerName": assignment.get("partnerName"),
+                "currentSupplierId": assignment.get("supplierId"),
+                "currentSupplierName": assignment.get("supplierName"),
                 "currentContactName": (assignment.get("contact") or {}).get("name"),
                 "searchText": [
                     record["number"].casefold(),
                     record["productName"].casefold(),
-                    record["productReference"].casefold(),
+                    record["productPartNumber"].casefold(),
                 ],
             }
         )
@@ -187,42 +187,42 @@ class ManufacturingRecords:
         if source["productId"] != record["productId"] or source["operationId"] != current["operationId"]:
             raise Problem("The source operation link is no longer valid.", 409, "source_unavailable")
         links = self.repo.query("assignments", "stepId", source["id"], transaction)
-        partners = self.many("partners", [link["partnerId"] for link in links], transaction)
+        suppliers = self.many("suppliers", [link["supplierId"] for link in links], transaction)
         choices = [
             {
-                "partner": partners[link["partnerId"]],
+                "supplier": suppliers[link["supplierId"]],
                 "suggestedContactId": link["contactId"],
                 "primary": source["primaryAssignmentId"] == link["id"],
             }
             for link in links
         ]
         return sorted(
-            choices, key=lambda choice: (not choice["primary"], choice["partner"]["name"].casefold())
+            choices, key=lambda choice: (not choice["primary"], choice["supplier"]["name"].casefold())
         )
 
     def choose_assignment(self, record, command, transaction):
         choices = self.eligible(record, transaction)
-        choice = next((c for c in choices if c["partner"]["id"] == command.partnerId), None)
+        choice = next((c for c in choices if c["supplier"]["id"] == command.supplierId), None)
         if not choice:
             raise Problem(
                 "This supplier is not currently linked to the source Product operation. Refresh the choices.",
                 409,
-                "partner_not_linked",
+                "supplier_not_linked",
             )
-        partner = choice["partner"]
+        supplier = choice["supplier"]
         contact = None
         if command.contactId:
             contact = self.repo.read("contacts", command.contactId, transaction)
-            if partner["type"] != "company" or contact["partnerId"] != partner["id"]:
+            if supplier["type"] != "company" or contact["supplierId"] != supplier["id"]:
                 raise Problem("Choose a contact belonging to this company supplier.")
             contact = {key: contact[key] for key in ("id", "name", "designation", "email", "phone")}
         return {
-            "partnerId": partner["id"],
-            "partnerName": partner["name"],
-            "type": partner["type"],
-            "relationship": partner["relationship"],
-            "email": partner["email"],
-            "phone": partner["phone"],
+            "supplierId": supplier["id"],
+            "supplierName": supplier["name"],
+            "type": supplier["type"],
+            "relationship": supplier["relationship"],
+            "email": supplier["email"],
+            "phone": supplier["phone"],
             "contact": contact,
         }
 
@@ -342,7 +342,7 @@ class ManufacturingRecords:
                     assignment = self.choose_assignment(record, data, transaction)
                     if action == "reassign":
                         previous = current["assignment"]
-                        if assignment["partnerId"] == previous["partnerId"] and (
+                        if assignment["supplierId"] == previous["supplierId"] and (
                             assignment["contact"] or {}
                         ).get("id") == (previous["contact"] or {}).get("id"):
                             raise Problem("Choose a different supplier or contact when reassigning.")
@@ -405,7 +405,7 @@ class ManufacturingRecords:
             if before == self.repo.workspace.get().to_dict():
                 return {
                     "record": record,
-                    "eligiblePartners": choices,
+                    "eligibleSuppliers": choices,
                     "eligibilityError": error,
                     "today": today().isoformat(),
                     **self.repo.meta(),
@@ -432,7 +432,7 @@ class ManufacturingRecords:
         view="active",
         search="",
         product_id=None,
-        partner_id=None,
+        supplier_id=None,
         operation_id=None,
         offset=0,
         limit=50,
@@ -441,7 +441,7 @@ class ManufacturingRecords:
             (field, value)
             for field, value in (
                 ("productId", product_id),
-                ("currentPartnerId", partner_id),
+                ("currentSupplierId", supplier_id),
                 ("currentOperationId", operation_id),
             )
             if value
@@ -491,7 +491,7 @@ class ManufacturingRecords:
             **self.repo.meta(),
         }
 
-    def supplier_work(self, search="", offset=0, limit=50, partner_id=None):
+    def supplier_work(self, search="", offset=0, limit=50, supplier_id=None):
         term = search.strip().casefold()
         for _ in range(3):
             before = self.repo.workspace.get().to_dict()
@@ -501,24 +501,24 @@ class ManufacturingRecords:
             rows = [
                 row for snapshot in query.stream()
                 for row in [snapshot.to_dict()]
-                if row.get("currentPartnerId")
-                and (not partner_id or row["currentPartnerId"] == partner_id)
+                if row.get("currentSupplierId")
+                and (not supplier_id or row["currentSupplierId"] == supplier_id)
             ]
             rows.sort(key=lambda row: (
-                row["currentPartnerName"].casefold(), row["currentPartnerId"],
+                row["currentSupplierName"].casefold(), row["currentSupplierId"],
                 row["productName"].casefold(), row["number"], row["id"],
             ))
             groups = {}
             for row in rows:
-                supplier = groups.setdefault(row["currentPartnerId"], {
-                    "id": row["currentPartnerId"], "name": row["currentPartnerName"],
+                supplier = groups.setdefault(row["currentSupplierId"], {
+                    "id": row["currentSupplierId"], "name": row["currentSupplierName"],
                     "jobCount": 0, "products": set(), "matches": False,
                 })
                 supplier["jobCount"] += 1
                 supplier["products"].add(row["productId"])
                 supplier["matches"] |= not term or any(
                     term in (row.get(field) or "").casefold() for field in (
-                        "currentPartnerName", "productName", "productReference",
+                        "currentSupplierName", "productName", "productPartNumber",
                         "currentOperationName", "number", "currentContactName",
                     )
                 )
@@ -528,10 +528,10 @@ class ManufacturingRecords:
                 for group in groups.values() if group["matches"]
             ]
             if before == self.repo.workspace.get().to_dict():
-                if partner_id:
+                if supplier_id:
                     return {
                         "items": rows[offset:offset + limit], "total": len(rows),
-                        "supplierName": rows[0]["currentPartnerName"] if rows else None,
+                        "supplierName": rows[0]["currentSupplierName"] if rows else None,
                         **self.repo.meta(),
                     }
                 return {
@@ -557,9 +557,9 @@ def manufacturing_records_router(repository):
     def supplier_work(
         search: str = Query("", max_length=200),
         offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
-        partnerId: Identifier | None = None,
+        supplierId: Identifier | None = None,
     ):
-        return service().supplier_work(search, offset, limit, partnerId)
+        return service().supplier_work(search, offset, limit, supplierId)
 
     @router.get("/preview/{product_id}")
     def preview(product_id: Identifier):
@@ -570,12 +570,12 @@ def manufacturing_records_router(repository):
         view: RecordView = "active",
         search: str = Query("", max_length=200),
         productId: Identifier | None = None,
-        partnerId: Identifier | None = None,
+        supplierId: Identifier | None = None,
         operationId: Identifier | None = None,
         offset: int = Query(0, ge=0),
         limit: int = Query(50, ge=1, le=100),
     ):
-        return service().list(view, search, productId, partnerId, operationId, offset, limit)
+        return service().list(view, search, productId, supplierId, operationId, offset, limit)
 
     def write(request, action, body):
         return repository().mutate(

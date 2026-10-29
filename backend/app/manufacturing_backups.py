@@ -25,6 +25,7 @@ from .backups import (
     identifier,
 )
 from .domain import Identifier, Name, Problem, Text, now, today
+from .manufacturing_compat import LEGACY_COLLECTIONS, LEGACY_FILES, canonical_counts, canonical_data
 from .manufacturing_domain import MODELS, Assignment, Step
 from .manufacturing_drive import child_folder, relocate, require_private
 from .manufacturing_records import ManufacturingRecords
@@ -33,10 +34,10 @@ from .storage import DriveBackend, digest, encode
 FILES = {
     "products": "products.json",
     "operations": "operations.json",
-    "partners": "partners.json",
+    "suppliers": "suppliers.json",
     "contacts": "contacts.json",
     "steps": "product-steps.json",
-    "assignments": "partner-links.json",
+    "assignments": "supplier-links.json",
     "manufacturingRecords": "manufacturing-records.json",
     "manufacturingRecordEvents": "activity-history.json",
     "sequences": "number-counters.json",
@@ -77,8 +78,8 @@ def entity_metadata(key, row):
 
 
 def assignment_snapshot(value):
-    validate_value(Identifier, value["partnerId"])
-    validate_value(Name, value["partnerName"])
+    validate_value(Identifier, value["supplierId"])
+    validate_value(Name, value["supplierName"])
     for field in ("email", "phone"):
         validate_value(Text, value[field])
     if value["type"] not in ("company", "individual") or value["relationship"] not in (
@@ -103,7 +104,7 @@ def checked_record(record, collections):
     if record["productId"] not in collections["products"] or not NUMBER.fullmatch(record["number"]):
         raise ValueError("Invalid manufacturing product or number.")
     validate_value(Name, record["productName"])
-    validate_value(Text, record["productReference"])
+    validate_value(Text, record["productPartNumber"])
     validate_value(Text, record["notes"])
     steps = record["operations"]
     if not isinstance(steps, list) or not 1 <= len(steps) <= 100:
@@ -172,8 +173,8 @@ def checked_record(record, collections):
             "completedCount",
             "currentOperationId",
             "currentOperationName",
-            "currentPartnerId",
-            "currentPartnerName",
+            "currentSupplierId",
+            "currentSupplierName",
             "currentContactName",
             "searchText",
             "searchChars",
@@ -184,6 +185,8 @@ def checked_record(record, collections):
 
 def checked_data(data):
     try:
+        if canonical_data(data) != data:
+            raise ValueError("Snapshots must use current manufacturing names.")
         if (
             set(data) - {"productFolders"} != {*FILES, "settings"}
             or data["settings"]
@@ -239,31 +242,31 @@ def checked_data(data):
                 not isinstance(product["stepIds"], list)
                 or len(set(product["stepIds"])) != len(product["stepIds"])
                 or product["searchChars"]
-                != sorted(set(f"{product['name']} {product['reference']}".casefold()))
+                != sorted(set(f"{product['name']} {product['partNumber']}".casefold()))
             ):
                 raise ValueError("Invalid Product process.")
             for key in product["stepIds"]:
                 if data["steps"][key]["productId"] != product["id"]:
                     raise ValueError("Invalid Product operation ownership.")
         for contact in data["contacts"].values():
-            if data["partners"][contact["partnerId"]]["type"] != "company":
+            if data["suppliers"][contact["supplierId"]]["type"] != "company":
                 raise ValueError("Invalid company contact.")
         links = {}
         for row in data["assignments"].values():
             Assignment.model_validate({key: row[key] for key in Assignment.model_fields})
             source = data["steps"][row["stepId"]]
-            partner = data["partners"][row["partnerId"]]
+            supplier = data["suppliers"][row["supplierId"]]
             if source["productId"] != row["productId"]:
                 raise ValueError("Invalid supplier link ownership.")
             if row["contactId"] and (
-                partner["type"] != "company"
-                or data["contacts"][row["contactId"]]["partnerId"] != partner["id"]
+                supplier["type"] != "company"
+                or data["contacts"][row["contactId"]]["supplierId"] != supplier["id"]
             ):
                 raise ValueError("Invalid linked company contact.")
             group = links.setdefault(row["stepId"], {})
-            if partner["id"] in group:
+            if supplier["id"] in group:
                 raise ValueError("Duplicate supplier link.")
-            group[partner["id"]] = row["id"]
+            group[supplier["id"]] = row["id"]
         for row in data["steps"].values():
             Step.model_validate({key: row[key] for key in Step.model_fields})
             if (
@@ -356,7 +359,7 @@ def archive(data, *, source, operation_id, actor, control):
     }
     manifest = {
         "format": "producttrackr-backup",
-        "version": 2 if "productFolders" in data else 1,
+        "version": 3,
         "createdAt": now(),
         "source": source,
         "operationId": operation_id,
@@ -385,14 +388,8 @@ def read_archive(content):
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive_file:
             entries = archive_file.infolist()
-            names = {**FILES, "settings": "workspace-settings.json"}
-            if PRODUCT_FOLDERS_FILE in archive_file.namelist():
-                names["productFolders"] = PRODUCT_FOLDERS_FILE
-            expected = {"manifest.json", *names.values()}
             if (
-                len(entries) != len(expected)
-                or {entry.filename for entry in entries} != expected
-                or sum(entry.file_size for entry in entries) > MAX_EXPANDED
+                sum(entry.file_size for entry in entries) > MAX_EXPANDED
                 or any(
                     entry.flag_bits & 1
                     or entry.is_dir()
@@ -404,9 +401,21 @@ def read_archive(content):
             ):
                 raise ValueError("Unsafe or incomplete archive.")
             manifest = _json(archive_file.read("manifest.json"))
+            version = manifest["version"]
+            if type(version) is not int or version not in (1, 2, 3):
+                raise ValueError("Unsupported archive version.")
+            names = {
+                **FILES, **(LEGACY_FILES if version < 3 else {}),
+                "settings": "workspace-settings.json",
+            }
+            if PRODUCT_FOLDERS_FILE in archive_file.namelist():
+                names["productFolders"] = PRODUCT_FOLDERS_FILE
+            expected = {"manifest.json", *names.values()}
             if (
-                manifest["format"] != "producttrackr-backup"
-                or manifest["version"] != (2 if "productFolders" in names else 1)
+                len(entries) != len(expected)
+                or {entry.filename for entry in entries} != expected
+                or manifest["format"] != "producttrackr-backup"
+                or version < 3 and version != (2 if "productFolders" in names else 1)
                 or manifest["source"] not in BACKUP_SOURCES
                 or manifest["checksum"] != digest({k: v for k, v in manifest.items() if k != "checksum"})
                 or set(manifest["files"]) != expected - {"manifest.json"}
@@ -419,7 +428,17 @@ def read_archive(content):
                 if hashlib.sha256(raw).hexdigest() != manifest["files"][name]:
                     raise ValueError("File checksum mismatch.")
                 data[kind] = _json(raw)
-            if checked_data(data) != manifest["counts"] or digest(data) != manifest["dataHash"]:
+            if version < 3:
+                data = {
+                    LEGACY_COLLECTIONS.get(kind, kind): rows
+                    for kind, rows in data.items()
+                }
+            raw_hash = digest(data)
+            if version < 3:
+                # Legacy checksums cover legacy keys, before conversion to current entity names.
+                data = canonical_data(data)
+            counts = canonical_counts(manifest["counts"]) if version < 3 else manifest["counts"]
+            if checked_data(data) != counts or raw_hash != manifest["dataHash"]:
                 raise ValueError("Snapshot integrity mismatch.")
             return data, manifest
     except (
@@ -450,7 +469,7 @@ def backup_row(file_id, data, manifest, *, name=None):
         "createdAt": manifest["createdAt"],
         "source": manifest["source"],
         "protected": False,
-        "counts": manifest["counts"],
+        "counts": canonical_counts(manifest["counts"]),
         "sizeBytes": len(data),
         "dataHash": manifest["dataHash"],
     }
@@ -460,15 +479,14 @@ class ManufacturingDriveBackupStore(DriveBackupStore):
     app = "producttrackr-backup"
 
     def __init__(self, settings):
-        self.folder_id = settings.manufacturing_backup_folder_id
-        token = settings.manufacturing_token_json or settings.token_json
+        self.settings = settings
+        self.folder_id = settings.root_id
+        token = settings.token_json
         if not self.folder_id or not token:
             raise Problem(
-                "Configure ProductTrackr's backup folder and reconnect Google Drive.", 503, "backup_folder"
+                "Configure the SalesTrackr root and reconnect Google Drive.", 503, "backup_folder"
             )
-        self.sales_folders = {settings.root_id, settings.backup_folder_id} - {""}
-        scopes = json.loads(token).get("scopes") if settings.manufacturing_token_json else None
-        self.backend = DriveBackend(token, self.folder_id, operator=True, scopes=scopes)
+        self.backend = DriveBackend(token, self.folder_id, operator=True)
         self.folder_url = None
 
     def _root_folder(self):
@@ -482,14 +500,12 @@ class ManufacturingDriveBackupStore(DriveBackupStore):
             )
         )
         if (
-            folder in self.sales_folders
-            or metadata.get("trashed")
+            metadata.get("trashed")
             or metadata.get("mimeType") != "application/vnd.google-apps.folder"
-            or metadata.get("appProperties", {}).get("app") not in (None, "producttrackr-backups")
-            or self.sales_folders.intersection(metadata.get("parents", []))
+            or metadata.get("appProperties", {}).get("app") == "salestrackr-firestore-backups"
         ):
             raise Problem(
-                "Use ProductTrackr's separate private backup folder, not a SalesTrackr folder.",
+                "Use the shared SalesTrackr root, not its Backups folder.",
                 503,
                 "backup_folder",
             )
@@ -497,7 +513,7 @@ class ManufacturingDriveBackupStore(DriveBackupStore):
         return folder
 
     def _folder(self):
-        folder = child_folder(self.backend, self._root_folder(), "backups")
+        folder = DriveBackupStore(self.settings)._folder()
         self.folder_url = f"https://drive.google.com/drive/folders/{folder}"
         return folder
 
@@ -590,10 +606,10 @@ class ManufacturingBackupManager(BackupManager):
             "schedule": {**status["schedule"], "active": False},
             "location": "Local simulated ProductTrackr backup folder"
             if local
-            else "ProductTrackr / Backups in private Google Drive",
+            else "SalesTrackr / Backups in private Google Drive",
             "configuredFolderUrl": (
-                f"https://drive.google.com/drive/folders/{self.settings.manufacturing_backup_folder_id}"
-                if self.settings.manufacturing_backup_folder_id
+                f"https://drive.google.com/drive/folders/{self.settings.root_id}"
+                if self.settings.root_id
                 else None
             ),
         }
@@ -630,7 +646,10 @@ class ManufacturingBackupManager(BackupManager):
         }
 
     def archived_metadata(self, recovery):
-        return {"backupId": recovery["id"], "backupDataHash": recovery["dataHash"]}
+        return {
+            "backupId": recovery["id"], "backupDataHash": recovery["dataHash"],
+            "namingVersion": self.repo.control.get("namingVersion", 0),
+        }
 
     def restore(self, *args, **kwargs):
         result = super().restore(*args, **kwargs)
@@ -717,7 +736,10 @@ class ManufacturingBackupManager(BackupManager):
                 references = [
                     document.reference
                     for kind in FILES
-                    for document in target.collection(kind).select([]).stream()
+                    for document in target.collection(
+                        kind if descriptor.get("namingVersion") == 1
+                        else LEGACY_COLLECTIONS.get(kind, kind)
+                    ).select([]).stream()
                 ]
                 if target.path != self.repo.workspace.path:
                     references.extend(

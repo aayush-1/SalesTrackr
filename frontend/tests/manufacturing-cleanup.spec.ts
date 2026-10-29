@@ -20,18 +20,18 @@ async function action(request: APIRequestContext, current: ManufacturingRecord, 
 }
 async function seed(request: APIRequestContext) {
   const name = `Cleanup${identifier().slice(0, 8)}`;
-  const partnerId = await write(request, '/partners', { name: `${name} Workshop` });
-  const productId = await write(request, '/products', { name: `${name} Gear`, reference: `${name}-042` });
+  const supplierId = await write(request, '/suppliers', { name: `${name} Workshop` });
+  const productId = await write(request, '/products', { name: `${name} Gear`, partNumber: `${name}-042` });
   const operationId = await write(request, '/operations', { name: `${name} Inspection` });
   const product = await (await request.get(`/api/manufacturing/products/${productId}`)).json() as ManufacturingDetail;
   const stepId = await write(request, `/products/${productId}/steps`, { operationId }, product.entity.version);
-  await write(request, `/steps/${stepId}/assignments`, { partnerId }, 1);
+  await write(request, `/steps/${stepId}/assignments`, { supplierId }, 1);
   const create = async () => {
     const preview = await (await request.get(`/api/manufacturing/records/preview/${productId}`)).json() as ManufacturingRecordPreview;
     return record(request, await write(request, '/records', { productId, sourceToken: preview.sourceToken }));
   };
   let completed = await create();
-  completed = await action(request, completed, 'assign', { stepId: completed.operations[0].id, partnerId });
+  completed = await action(request, completed, 'assign', { stepId: completed.operations[0].id, supplierId });
   completed = await action(request, completed, 'complete', { stepId: completed.operations[0].id });
   return { completed, create, productId };
 }
@@ -55,7 +55,8 @@ test('only selected completed jobs are deleted after confirmation and a verified
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
     if (route.request().url().includes('/api/manufacturing/')) return route.continue();
-    salesCalls.push(route.request().url()); return route.abort();
+    if (!/\/api\/(?:me|status|settings\/backup-recovery)(?:\?|$)/.test(route.request().url())) salesCalls.push(route.request().url());
+    return route.continue();
   });
   await open(page);
   await expect(page.getByRole('checkbox', { name: `Select ${waiting.number}`, exact: true })).toHaveCount(0);
@@ -72,7 +73,7 @@ test('only selected completed jobs are deleted after confirmation and a verified
   expect(await record(request, cancelled.id)).toEqual(cancelled);
   expect(await (await request.get(`/api/manufacturing/products/${source.productId}`)).json()).toEqual(productBefore);
   expect((await (await request.get('/api/accounts')).json()).items).toEqual(salesBefore);
-  const backups = await (await request.get('/api/manufacturing/settings/backup-recovery')).json();
+  const backups = await (await request.get('/api/settings/backup-recovery')).json();
   expect(backups.backups[0].counts.manufacturingRecords).toBeGreaterThanOrEqual(3);
   for (const width of [320, 390, 768, 1024, 1440]) {
     await page.setViewportSize({ width, height: 960 });
@@ -99,7 +100,7 @@ test('lost cleanup responses retry the frozen request without deleting or counti
   await expect(dialog.getByRole('button', { name: 'Retry same cleanup', exact: true })).toBeEnabled();
   await expect(page.getByLabel('Type DELETE to confirm permanent deletion', { exact: true })).toBeDisabled();
   await page.getByRole('tab', { name: 'General', exact: true }).dispatchEvent('click');
-  await expect(page.getByRole('tab', { name: 'Record cleanup', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'Manufacturing record cleanup', exact: true })).toHaveAttribute('aria-selected', 'true');
   await dialog.getByRole('button', { name: 'Retry same cleanup', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByText('Deleted 1 completed job(s)', { exact: false })).toBeVisible();

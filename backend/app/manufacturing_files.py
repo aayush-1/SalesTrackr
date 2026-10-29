@@ -34,8 +34,7 @@ class ProductFiles:
         self.guard(self.repo.workspace.get().to_dict(), workspace, generation)
         self.repo.read("products", product_id)
         configured = bool(
-            self.settings.manufacturing_backup_folder_id
-            and (self.settings.manufacturing_token_json or self.settings.token_json)
+            self.settings.root_id and self.settings.token_json
         )
         if not configured and self.store is None:
             return {**self.repo.meta(), "configured": False, "url": None}
@@ -89,7 +88,7 @@ class ProductFiles:
                 or metadata.get("appProperties") != properties
             ):
                 raise Problem(
-                    "The product folder was moved or replaced. Restore it to ProductTrackr / Products.",
+                    "The product folder was moved or replaced. Restore it to SalesTrackr / Products.",
                     409, "product_folder_changed",
                 )
 
@@ -106,7 +105,7 @@ class ProductFiles:
                 backend._execute(backend._api().files().create(
                     body={
                         "id": mapping["id"],
-                        "name": f"{product['reference'] + ' - ' if product['reference'] else ''}"
+                        "name": f"{product['partNumber'] + ' - ' if product['partNumber'] else ''}"
                                 f"{product['name']}",
                         "mimeType": FOLDER_MIME, "parents": [folder], "appProperties": properties,
                     },
@@ -142,7 +141,7 @@ class ProductFiles:
             check_folder(metadata)
             if self.repo.read("products", product_id)["version"] != product["version"]:
                 continue
-            name = f"{product['reference'] + ' - ' if product['reference'] else ''}{product['name']}"
+            name = f"{product['partNumber'] + ' - ' if product['partNumber'] else ''}{product['name']}"
             if metadata.get("name") != name:
                 self.guard(self.repo.workspace.get().to_dict(), workspace, generation)
                 request = backend._conditional_api().files().update(

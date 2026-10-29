@@ -42,7 +42,7 @@ function SupplierManufacturingWork({ supplierId }: { supplierId: string }) {
   const [offset, setOffset] = useState(0);
   const { refresh } = useManufacturing();
   const limit = 50;
-  const resource = useManufacturingResource<SupplierJobs>(`/records/supplier-work?partnerId=${encodeURIComponent(supplierId)}&offset=${offset}&limit=${limit}`);
+  const resource = useManufacturingResource<SupplierJobs>(`/records/supplier-work?supplierId=${encodeURIComponent(supplierId)}&offset=${offset}&limit=${limit}`);
   return <>
     <Link className="text-button" to="/manufacturing/supplier-work"><ArrowLeft size={15} />All suppliers in progress</Link>
     <section className="panel bt-directory" aria-label="Supplier manufacturing work">
@@ -54,7 +54,7 @@ function SupplierManufacturingWork({ supplierId }: { supplierId: string }) {
       {resource.loading ? <Loading /> : resource.data && (resource.data.items.length ? <div className="table-scroll"><table><thead><tr>
         <th>Product / part number</th><th>Current operation</th><th>Contact</th><th>Manufacturing record</th>
       </tr></thead><tbody>{resource.data.items.map(row => <tr key={row.id}>
-        <td><Link to={`/manufacturing/products/${row.productId}`}>{row.productName}</Link><span className="cell-sub">{row.productReference || 'No part number'}</span></td>
+        <td><Link to={`/manufacturing/products/${row.productId}`}>{row.productName}</Link><span className="cell-sub">{row.productPartNumber || 'No part number'}</span></td>
         <td>{row.currentOperationName}</td><td>{row.currentContactName || 'No contact assigned'}</td>
         <td><Link to={`/manufacturing/records/${row.id}`}>{row.number}</Link></td>
       </tr>)}</tbody></table></div> : <Empty title="No current manufacturing work" text="This supplier has no assigned, in-progress jobs. Awaiting assignment, completed and cancelled jobs are excluded." />)}
@@ -62,7 +62,7 @@ function SupplierManufacturingWork({ supplierId }: { supplierId: string }) {
         <button className="icon-button" aria-label="Previous supplier jobs page" disabled={!offset} onClick={() => setOffset(Math.max(0, offset - limit))}><ChevronLeft size={17} /></button>
         <button className="icon-button" aria-label="Next supplier jobs page" disabled={offset + limit >= resource.data.total} onClick={() => setOffset(offset + limit)}><ChevronRight size={17} /></button>
       </div></div>}
-      <div className="bt-toolbar"><Link className="text-button" to={`/manufacturing/partners/${encodeURIComponent(supplierId)}`}>Open supplier profile<ArrowRight size={14} /></Link></div>
+      <div className="bt-toolbar"><Link className="text-button" to={`/manufacturing/suppliers/${encodeURIComponent(supplierId)}`}>Open supplier profile<ArrowRight size={14} /></Link></div>
     </section>
   </>;
 }

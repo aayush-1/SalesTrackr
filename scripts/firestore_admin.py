@@ -14,6 +14,7 @@ from backend.app.domain import Problem, now
 from backend.app.firestore_storage import FirestoreRepository
 from backend.app.queries import VIEWS
 from backend.app.record_cleanup import RecordCleanup
+from backend.app.shared_backups import SharedBackupManager
 from backend.app.storage import DriveBackend, digest
 
 
@@ -223,9 +224,12 @@ def main():
         if settings.storage_backend != "firestore":
             raise Problem("The live storage backend is not Firestore.")
         repo = FirestoreRepository(settings)
+        manager = (
+            SharedBackupManager(repo, settings)
+            if settings.manufacturing_enabled else BackupManager(repo, settings)
+        )
         if args.command == "verify-live":
             source = DriveBackend(settings.token_json, settings.root_id, operator=True)
-            manager = BackupManager(repo, settings)
             result = verify_live(repo, source, manager.store)
             actor = settings.recovery_admins[0] if settings.recovery_admins else "recovery-operator"
             status = manager.status(actor)
@@ -237,7 +241,7 @@ def main():
                 eligibleCleanupRecords=cleanup["total"], backupReadbackVerified=False,
             )
             if status["backups"]:
-                _, manifest = read_archive(manager.get(status["backups"][0]["id"])[0])
+                _, manifest = manager.read_archive(manager.get(status["backups"][0]["id"])[0])
                 result.update(backupReadbackVerified=True, latestBackupCounts=manifest["counts"])
             print(json.dumps(result, sort_keys=True))
             return
@@ -245,7 +249,7 @@ def main():
             print("Weekly backups are disabled; no backup was created.")
             return
         operation_id = args.operation_id or (scheduled_operation_id() if args.scheduled else repo.allocate())
-        row = BackupManager(repo, settings).backup(
+        row = manager.backup(
             operation_id, "scheduled-job" if args.scheduled else "recovery-operator",
             source="scheduled" if args.scheduled else "manual",
         )

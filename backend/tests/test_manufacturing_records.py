@@ -55,20 +55,20 @@ def apply(client, current, action, **data):
 @pytest.fixture
 def process(app):
     client, settings = app
-    product = create(client, "products", name="Transmission Gear", reference="GEAR-042")
+    product = create(client, "products", name="Transmission Gear", partNumber="GEAR-042")
     operation = create(client, "operations", name="Machining")
     steps = [step(client, product, operation) for _ in range(3)]
-    company = create(client, "partners", name="Company A")
-    contact = create(client, "contacts", name="Alex", partnerId=company["id"])
-    other_company = create(client, "partners", name="Company B", relationship="internal")
-    other_contact = create(client, "contacts", name="Blair", partnerId=other_company["id"])
-    individual = create(client, "partners", name="Independent specialist", type="individual")
+    company = create(client, "suppliers", name="Company A")
+    contact = create(client, "contacts", name="Alex", supplierId=company["id"])
+    other_company = create(client, "suppliers", name="Company B", relationship="internal")
+    other_contact = create(client, "contacts", name="Blair", supplierId=other_company["id"])
+    individual = create(client, "suppliers", name="Independent specialist", type="individual")
     for source in steps:
         response, _ = command(
             client,
             f"/steps/{source['id']}/assignments",
             {
-                "partnerId": company["id"],
+                "supplierId": company["id"],
                 "contactId": contact["id"],
             },
             source["version"],
@@ -79,7 +79,7 @@ def process(app):
             client,
             f"/steps/{source['id']}/assignments",
             {
-                "partnerId": individual["id"],
+                "supplierId": individual["id"],
             },
             current["version"],
         )
@@ -96,9 +96,9 @@ def test_creation_snapshots_independent_jobs_and_idempotent_numbers(process):
     assert first["number"] == "MFG-00001"
     assert second["number"] == "MFG-00002"
     assert [s["status"] for s in first["operations"]] == ["ready", "pending", "pending"]
-    assert first["currentPartnerId"] is None
+    assert first["currentSupplierId"] is None
     assert len({s["id"] for s in first["operations"]}) == 3
-    first = apply(client, first, "assign", partnerId=company["id"], contactId=contact["id"])
+    first = apply(client, first, "assign", supplierId=company["id"], contactId=contact["id"])
     assert first["status"] == "in_progress"
     assert record(client, second["id"])["record"]["status"] == "ready"
     original = record(client, second["id"])["record"]
@@ -121,7 +121,7 @@ def test_creation_snapshots_independent_jobs_and_idempotent_numbers(process):
             f"/products/{product['id']}",
             {
                 "name": "Renamed Product",
-                "reference": "NEW-ID",
+                "partNumber": "NEW-ID",
             },
             current["version"],
             product["id"],
@@ -158,7 +158,7 @@ def test_creation_snapshots_independent_jobs_and_idempotent_numbers(process):
         == 200
     )
     assert record(client, second["id"])["record"] == original
-    assert original["productReference"] == "GEAR-042"
+    assert original["productPartNumber"] == "GEAR-042"
     assert original["operations"][0]["name"] == "Machining"
     assert client.get(f"/api/manufacturing/records/{first['id']}/history").json()["total"] == 2
 
@@ -166,20 +166,20 @@ def test_creation_snapshots_independent_jobs_and_idempotent_numbers(process):
 def test_supplier_work_lists_only_actual_current_assignments_with_search_and_pagination(process):
     client, _, product, company, contact, _, _, individual = process
     first, _ = job(client, product)
-    first = apply(client, first, "assign", partnerId=company["id"], contactId=contact["id"])
+    first = apply(client, first, "assign", supplierId=company["id"], contactId=contact["id"])
     second, _ = job(client, product)
-    second = apply(client, second, "assign", partnerId=individual["id"])
+    second = apply(client, second, "assign", supplierId=individual["id"])
     job(client, product)
     endpoint = "/api/manufacturing/records/supplier-work"
     result = client.get(endpoint).json()
     assert result["total"] == result["supplierCount"] == 2
     assert result["jobCount"] == 2
     assert [row["id"] for row in result["items"]] == [company["id"], individual["id"]]
-    current = client.get(endpoint, params={"partnerId": company["id"]}).json()
+    current = client.get(endpoint, params={"supplierId": company["id"]}).json()
     assert current["supplierName"] == company["name"]
     assert current["items"][0]["id"] == first["id"]
     assert current["items"][0]["currentOperationName"] == "Machining"
-    assert current["items"][0]["productReference"] == "GEAR-042"
+    assert current["items"][0]["productPartNumber"] == "GEAR-042"
     assert client.get(endpoint, params={"offset": 1, "limit": 1}).json()["items"][0]["id"] == individual["id"]
     for term, expected in [
         ("company a", [company["id"]]), ("alex", [company["id"]]),
@@ -191,11 +191,11 @@ def test_supplier_work_lists_only_actual_current_assignments_with_search_and_pag
     first = apply(client, first, "complete")
     assert first["status"] == "ready"
     assert client.get(endpoint).json()["items"][0]["id"] == individual["id"]
-    assert client.get(endpoint, params={"partnerId": company["id"]}).json()["total"] == 0
+    assert client.get(endpoint, params={"supplierId": company["id"]}).json()["total"] == 0
     second = apply(client, second, "cancel", reason="No longer active")
     assert client.get(endpoint).json()["total"] == 0
     for _ in range(2):
-        first = apply(client, first, "assign", partnerId=company["id"])
+        first = apply(client, first, "assign", supplierId=company["id"])
         first = apply(client, first, "complete")
     assert first["status"] == "completed"
     assert client.get(endpoint).json()["items"] == []
@@ -204,20 +204,20 @@ def test_supplier_work_lists_only_actual_current_assignments_with_search_and_pag
 def test_supplier_work_groups_before_pagination_and_opens_all_current_supplier_jobs(process):
     client, _, product, company, contact, _, _, individual = process
     first, _ = job(client, product)
-    first = apply(client, first, "assign", partnerId=company["id"], contactId=contact["id"])
-    other = create(client, "products", name="Second part", reference="SECOND-01")
+    first = apply(client, first, "assign", supplierId=company["id"], contactId=contact["id"])
+    other = create(client, "products", name="Second part", partNumber="SECOND-01")
     operation_id = detail(client, product)["steps"][0]["operationId"]
     source = step(client, other, {"id": operation_id})
     response, _ = command(
-        client, f"/steps/{source['id']}/assignments", {"partnerId": company["id"]}, source["version"],
+        client, f"/steps/{source['id']}/assignments", {"supplierId": company["id"]}, source["version"],
     )
     assert response.status_code == 200
     assigned = [first]
     for _ in range(2):
         current, _ = job(client, other)
-        assigned.append(apply(client, current, "assign", partnerId=company["id"]))
+        assigned.append(apply(client, current, "assign", supplierId=company["id"]))
     unrelated, _ = job(client, product)
-    apply(client, unrelated, "assign", partnerId=individual["id"])
+    apply(client, unrelated, "assign", supplierId=individual["id"])
     endpoint = "/api/manufacturing/records/supplier-work"
     result = client.get(endpoint, params={"limit": 1}).json()
     assert result["total"] == result["supplierCount"] == 2 and result["jobCount"] == 4
@@ -229,7 +229,7 @@ def test_supplier_work_groups_before_pagination_and_opens_all_current_supplier_j
     found = client.get(endpoint, params={"search": "SECOND-01"}).json()
     assert found["total"] == 1 and found["items"][0]["jobCount"] == 3
     pages = [
-        client.get(endpoint, params={"partnerId": company["id"], "offset": offset, "limit": 1}).json()
+        client.get(endpoint, params={"supplierId": company["id"], "offset": offset, "limit": 1}).json()
         for offset in range(3)
     ]
     assert all(page["total"] == 3 for page in pages)
@@ -274,30 +274,30 @@ def test_sequential_work_and_actual_date_rules(process):
     assert transition(client, current, "complete")[0].status_code == 409
     assert (
         transition(
-            client, current, "assign", step_id=current["operations"][1]["id"], partnerId=company["id"]
+            client, current, "assign", step_id=current["operations"][1]["id"], supplierId=company["id"]
         )[0].status_code
         == 409
     )
     assert (
-        transition(client, current, "assign", partnerId=company["id"], contactId=wrong_contact["id"])[
+        transition(client, current, "assign", supplierId=company["id"], contactId=wrong_contact["id"])[
             0
         ].status_code
         == 422
     )
     assert (
-        transition(client, current, "assign", partnerId=individual["id"], contactId=contact["id"])[
+        transition(client, current, "assign", supplierId=individual["id"], contactId=contact["id"])[
             0
         ].status_code
         == 422
     )
     future = (today() + timedelta(days=1)).isoformat()
     assert (
-        transition(client, current, "assign", partnerId=company["id"], occurredOn=future)[0].status_code
+        transition(client, current, "assign", supplierId=company["id"], occurredOn=future)[0].status_code
         == 422
     )
     assigned_on = (today() - timedelta(days=2)).isoformat()
     current = apply(
-        client, current, "assign", partnerId=company["id"], contactId=contact["id"], occurredOn=assigned_on
+        client, current, "assign", supplierId=company["id"], contactId=contact["id"], occurredOn=assigned_on
     )
     assert current["currentContactName"] == "Alex"
     assert (
@@ -309,13 +309,13 @@ def test_sequential_work_and_actual_date_rules(process):
     current = apply(client, current, "complete", occurredOn=(today() - timedelta(days=1)).isoformat())
     assert current["status"] == "ready"
     assert current["completedCount"] == 1
-    assert current["currentPartnerId"] is None
+    assert current["currentSupplierId"] is None
     assert (
-        transition(client, current, "assign", partnerId=company["id"], occurredOn=assigned_on)[0].status_code
+        transition(client, current, "assign", supplierId=company["id"], occurredOn=assigned_on)[0].status_code
         == 422
     )
     for _ in range(2):
-        current = apply(client, current, "assign", partnerId=individual["id"])
+        current = apply(client, current, "assign", supplierId=individual["id"])
         current = apply(client, current, "complete")
     assert current["status"] == "completed"
     assert current["currentIndex"] is None
@@ -329,25 +329,25 @@ def test_sequential_work_and_actual_date_rules(process):
 def test_live_link_choices_and_current_work_survive_unlink(process):
     client, _, product, company, contact, other, other_contact, _ = process
     current, _ = job(client, product)
-    assert transition(client, current, "assign", partnerId=other["id"])[0].status_code == 409
+    assert transition(client, current, "assign", supplierId=other["id"])[0].status_code == 409
     source = detail(client, product)["steps"][0]
     linked, link = command(
         client,
         f"/steps/{source['id']}/assignments",
         {
-            "partnerId": other["id"],
+            "supplierId": other["id"],
             "contactId": other_contact["id"],
         },
         source["version"],
     )
     assert linked.status_code == 200
-    assert other["id"] in [c["partner"]["id"] for c in record(client, current["id"])["eligiblePartners"]]
-    current = apply(client, current, "assign", partnerId=company["id"], contactId=contact["id"])
+    assert other["id"] in [c["supplier"]["id"] for c in record(client, current["id"])["eligibleSuppliers"]]
+    current = apply(client, current, "assign", supplierId=company["id"], contactId=contact["id"])
     current = apply(
         client,
         current,
         "reassign",
-        partnerId=other["id"],
+        supplierId=other["id"],
         contactId=other_contact["id"],
         reason="Use the in-house workshop",
     )
@@ -362,49 +362,51 @@ def test_live_link_choices_and_current_work_survive_unlink(process):
         )[0].status_code
         == 200
     )
-    assert other["id"] not in [c["partner"]["id"] for c in record(client, current["id"])["eligiblePartners"]]
-    assert record(client, current["id"])["record"]["currentPartnerName"] == other["name"]
+    assert other["id"] not in [
+        c["supplier"]["id"] for c in record(client, current["id"])["eligibleSuppliers"]
+    ]
+    assert record(client, current["id"])["record"]["currentSupplierName"] == other["name"]
     assert (
-        transition(client, current, "reassign", partnerId=other["id"], reason="Removed link")[0].status_code
+        transition(client, current, "reassign", supplierId=other["id"], reason="Removed link")[0].status_code
         == 409
     )
     assert apply(client, current, "complete")["completedCount"] == 1
 
 
-def test_empty_partner_pool_can_be_linked_after_creation(app):
+def test_empty_supplier_pool_can_be_linked_after_creation(app):
     client, _ = app
     product = create(client, "products", name="New process")
     operation = create(client, "operations", name="Cut")
     source = step(client, product, operation)
     current, _ = job(client, product)
-    assert record(client, current["id"])["eligiblePartners"] == []
-    partner = create(client, "partners", name="Workshop")
+    assert record(client, current["id"])["eligibleSuppliers"] == []
+    supplier = create(client, "suppliers", name="Workshop")
     assert (
         command(
-            client, f"/steps/{source['id']}/assignments", {"partnerId": partner["id"]}, source["version"]
+            client, f"/steps/{source['id']}/assignments", {"supplierId": supplier["id"]}, source["version"]
         )[0].status_code
         == 200
     )
-    assert len(record(client, current["id"])["eligiblePartners"]) == 1
-    assert apply(client, current, "assign", partnerId=partner["id"])["status"] == "in_progress"
+    assert len(record(client, current["id"])["eligibleSuppliers"]) == 1
+    assert apply(client, current, "assign", supplierId=supplier["id"])["status"] == "in_progress"
 
 
 def test_reassignment_undo_cancellation_and_immutable_history(process):
     client, _, product, company, _, _, _, individual = process
     current, _ = job(client, product)
-    current = apply(client, current, "assign", partnerId=company["id"])
+    current = apply(client, current, "assign", supplierId=company["id"])
     assert (
-        transition(client, current, "reassign", partnerId=individual["id"], reason=" ")[0].status_code == 422
+        transition(client, current, "reassign", supplierId=individual["id"], reason=" ")[0].status_code == 422
     )
-    current = apply(client, current, "reassign", partnerId=individual["id"], reason="Move to specialist")
+    current = apply(client, current, "reassign", supplierId=individual["id"], reason="Move to specialist")
     first_step_id = current["operations"][0]["id"]
     current = apply(client, current, "complete", note="Checked dimensions")
     current = apply(client, current, "undo", stepId=first_step_id, reason="Completion entered by mistake")
     assert current["completedCount"] == 0
-    assert current["operations"][0]["assignment"]["partnerId"] == individual["id"]
+    assert current["operations"][0]["assignment"]["supplierId"] == individual["id"]
     assert current["operations"][1]["status"] == "pending"
     current = apply(client, current, "complete")
-    current = apply(client, current, "assign", partnerId=company["id"])
+    current = apply(client, current, "assign", supplierId=company["id"])
     assert transition(client, current, "undo", stepId=first_step_id, reason="Too late")[0].status_code == 409
     assert transition(client, current, "cancel", reason=" ")[0].status_code == 422
     current = apply(client, current, "cancel", reason="Customer requirement withdrawn")
@@ -416,8 +418,8 @@ def test_reassignment_undo_cancellation_and_immutable_history(process):
     assert history["total"] == 8
     assert [e["sequence"] for e in history["items"]] == list(range(8, 0, -1))
     reassignment = next(e for e in history["items"] if e["action"] == "reassign")
-    assert reassignment["previousAssignment"]["partnerName"] == company["name"]
-    assert reassignment["assignment"]["partnerName"] == individual["name"]
+    assert reassignment["previousAssignment"]["supplierName"] == company["name"]
+    assert reassignment["assignment"]["supplierName"] == individual["name"]
     first_completion = next(e for e in history["items"] if e.get("note") == "Checked dimensions")
     assert first_completion["action"] == "complete"
     second_page = client.get(f"/api/manufacturing/records/{current['id']}/history?offset=2&limit=2").json()
@@ -428,7 +430,7 @@ def test_final_completion_can_reopen_only_the_last_step(process):
     client, _, product, company, *_ = process
     current, _ = job(client, product)
     for _ in range(3):
-        current = apply(client, current, "assign", partnerId=company["id"])
+        current = apply(client, current, "assign", supplierId=company["id"])
         current = apply(client, current, "complete")
     assert transition(client, current, "cancel", reason="Already complete")[0].status_code == 409
     assert (
@@ -448,7 +450,7 @@ def test_final_completion_can_reopen_only_the_last_step(process):
 def test_concurrent_and_retried_completion_is_exactly_once(process):
     client, _, product, company, *_ = process
     current, _ = job(client, product)
-    current = apply(client, current, "assign", partnerId=company["id"])
+    current = apply(client, current, "assign", supplierId=company["id"])
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(lambda _: transition(client, current, "complete"), range(2)))
     assert sorted(response.status_code for response, _ in results) == [200, 409]
@@ -466,7 +468,7 @@ def test_record_queries_counts_filters_search_and_pagination(process):
     client, _, product, company, *_ = process
     waiting, _ = job(client, product)
     running, _ = job(client, product)
-    running = apply(client, running, "assign", partnerId=company["id"])
+    running = apply(client, running, "assign", supplierId=company["id"])
     cancelled, _ = job(client, product)
     apply(client, cancelled, "cancel", reason="Sample cancellation")
     assert client.get("/api/manufacturing/records/summary").json()["counts"] == {
@@ -486,7 +488,7 @@ def test_record_queries_counts_filters_search_and_pagination(process):
         params={
             "view": "active",
             "productId": product["id"],
-            "partnerId": company["id"],
+            "supplierId": company["id"],
             "operationId": running["currentOperationId"],
             "search": "Transmission",
         },
@@ -501,7 +503,7 @@ def test_record_queries_counts_filters_search_and_pagination(process):
 def test_record_commands_preserve_workspace_fences_and_route_identifiers(process):
     client, _, product, company, *_ = process
     current, _ = job(client, product)
-    response, body = transition(client, current, "assign", partnerId=company["id"])
+    response, body = transition(client, current, "assign", supplierId=company["id"])
     assert response.status_code == 200
     body["id"] = uuid4().hex
     assert command(client, f"/records/{current['id']}/complete", {}, body=body)[0].status_code == 422
@@ -527,14 +529,14 @@ def test_assignment_labels_stay_frozen_and_reassignment_dates_stay_sequential(pr
         client,
         current,
         "assign",
-        partnerId=company["id"],
+        supplierId=company["id"],
         contactId=contact["id"],
         occurredOn=original_date,
     )
     assert (
         command(
             client,
-            f"/partners/{company['id']}",
+            f"/suppliers/{company['id']}",
             {"name": "Renamed company"},
             company["version"],
             company["id"],
@@ -548,7 +550,7 @@ def test_assignment_labels_stay_frozen_and_reassignment_dates_stay_sequential(pr
             f"/contacts/{contact['id']}",
             {
                 "name": "Renamed contact",
-                "partnerId": company["id"],
+                "supplierId": company["id"],
             },
             contact["version"],
             contact["id"],
@@ -557,13 +559,13 @@ def test_assignment_labels_stay_frozen_and_reassignment_dates_stay_sequential(pr
         == 200
     )
     actual = record(client, current["id"])["record"]["operations"][0]["assignment"]
-    assert actual["partnerName"] == "Company A" and actual["contact"]["name"] == "Alex"
+    assert actual["supplierName"] == "Company A" and actual["contact"]["name"] == "Alex"
     assert (
         transition(
             client,
             current,
             "reassign",
-            partnerId=company["id"],
+            supplierId=company["id"],
             contactId=contact["id"],
             reason="Same responsibility",
         )[0].status_code
@@ -574,7 +576,7 @@ def test_assignment_labels_stay_frozen_and_reassignment_dates_stay_sequential(pr
             client,
             current,
             "reassign",
-            partnerId=individual["id"],
+            supplierId=individual["id"],
             reason="Move work",
             occurredOn=(today() - timedelta(days=5)).isoformat(),
         )[0].status_code
@@ -584,28 +586,28 @@ def test_assignment_labels_stay_frozen_and_reassignment_dates_stay_sequential(pr
         client,
         current,
         "reassign",
-        partnerId=individual["id"],
+        supplierId=individual["id"],
         reason="Move work",
         occurredOn=(today() - timedelta(days=2)).isoformat(),
     )
     assert transition(client, current, "complete", occurredOn=original_date)[0].status_code == 422
     history = client.get(f"/api/manufacturing/records/{current['id']}/history").json()["items"]
     assert history[0]["previousAssignment"]["contact"]["name"] == "Alex"
-    assert history[1]["assignment"]["partnerName"] == "Company A"
+    assert history[1]["assignment"]["supplierName"] == "Company A"
 
 
 def test_unavailable_source_step_does_not_substitute_another_occurrence_or_block_completion(process):
     client, settings, product, company, *_ = process
     current, _ = job(client, product)
-    current = apply(client, current, "assign", partnerId=company["id"])
+    current = apply(client, current, "assign", supplierId=company["id"])
     repo = ManufacturingRepository(settings)
     repo.ref("steps", current["operations"][0]["sourceStepId"]).delete()
     view = record(client, current["id"])
-    assert view["eligiblePartners"] == []
+    assert view["eligibleSuppliers"] == []
     assert "source Product operation is unavailable" in view["eligibilityError"]
     assert apply(client, current, "complete")["completedCount"] == 1
     view = record(client, current["id"])
-    assert len(view["eligiblePartners"]) == 2
+    assert len(view["eligibleSuppliers"]) == 2
     assert view["record"]["currentIndex"] == 1
 
 

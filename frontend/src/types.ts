@@ -57,7 +57,10 @@ export interface Save<T> extends Detail<T> {
   related?: RecordRelations;
 }
 export interface Me extends WorkspaceStorage { email: string; mode: 'demo' | 'production'; today: string }
-export interface BackupCounts { account: number; contact: number; record: number; revisions: number }
+export interface BackupCounts {
+  account: number; contact: number; record: number; revisions: number;
+  products?: number; manufacturingRecords?: number;
+}
 export interface Backup {
   id: string; name: string; createdAt: string;
   source: 'manual' | 'scheduled' | 'migration' | 'pre-restore';
@@ -69,6 +72,7 @@ export interface BackupSettings {
   schedule: { enabled: boolean; active?: boolean; weekday: 'Sunday'; time: '02:00'; timezone: 'Asia/Kolkata' };
   retention: 10; backups: Backup[]; lastBackupAt: string | null; lastError: string | null;
   canBackup: boolean; canRestore: boolean; generation: string | null;
+  manufacturingEnabled?: boolean; includesManufacturing?: boolean;
 }
 export interface BackupPreview {
   token: string; backup: Backup; generation: string; warnings: string[]; expiresAt: string;

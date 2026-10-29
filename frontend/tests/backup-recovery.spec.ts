@@ -54,7 +54,8 @@ test('lower-left Settings navigation, tabs, mobile navigation and honest local s
   await expect(page.getByRole('navigation', { name: 'Main navigation' }).getByRole('link', { name: 'Settings', exact: true })).toHaveCount(0);
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'Backup and recovery' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'General', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Backup and recovery' }).click();
   await expect(page.getByText('Local simulation only.', { exact: false })).toBeVisible();
   await page.getByRole('tab', { name: 'General', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workspace storage' })).toBeVisible();
@@ -70,7 +71,7 @@ test('lower-left Settings navigation, tabs, mobile navigation and honest local s
 
 test('manual readable backup, Drive discovery, ten total copies and weekly preference', async ({ page }) => {
   const mock = await mockWorkspace(page, { mode: 'production', location: 'Private Drive folder', folderUrl: 'https://drive.google.com/drive/folders/private' });
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await expect(page.getByRole('link', { name: 'Open private Drive folder' })).toHaveAttribute('href', mock.state.folderUrl!);
   await expect(page.getByText('Protected · never rotated out')).toHaveCount(0);
   await expect(page.getByText('This list comes from your private Drive backup folder.', { exact: false })).toBeVisible();
@@ -99,7 +100,7 @@ test('backup double clicks and interrupted response keep one exact operation ID'
     if (attempts === 1) { await route.abort(); return true; }
     await route.fulfill({ json: { backup: manual } }); return true;
   };
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await page.getByRole('button', { name: 'Create simulated backup' }).evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
   await expect(page.getByRole('button', { name: 'Retry same backup' })).toBeVisible();
   expect(attempts).toBe(1);
@@ -122,7 +123,7 @@ test('Drive selection only previews, typed confirmation, pending progress and co
     await route.fulfill({ json: { restored: true, generation: 'generation-two', counts: original.counts, recoveryBackup: manual } });
     return true;
   };
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await page.getByLabel('Choose a Drive backup').selectOption('original');
   expect(restores(mock)).toHaveLength(0);
   expect(mock.requests.filter(request => request.url().endsWith('/inspect'))).toHaveLength(0);
@@ -159,7 +160,7 @@ test('ZIP upload validates extension and size, clears preview, sends raw bytes a
     else await route.fulfill({ status: 409, json: { error: { message: 'Live data changed. Inspect again.', code: 'stale_preview' } } });
     return true;
   };
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   const upload = page.getByLabel('Or upload a ZIP or legacy JSON archive');
   await upload.setInputFiles({ name: 'backup.txt', mimeType: 'text/plain', buffer: Buffer.from('{}') });
   await expect(page.getByText('Choose a .zip or legacy .json backup archive.')).toBeVisible();
@@ -213,7 +214,7 @@ test('expired previews and invalid server archives fail closed; demo schedule do
     else await route.fulfill({ json: preview(original, { expiresAt: '2020-01-01T00:00:00Z' }) });
     return true;
   };
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await expect(page.getByText('Last backup error: Last weekly backup failed.')).toBeVisible();
   await page.getByLabel('Enable weekly backups').check();
   await expect(page.getByText('Schedule preference saved locally. No cloud scheduler is running.')).toBeVisible();
@@ -228,7 +229,7 @@ test('expired previews and invalid server archives fail closed; demo schedule do
 
 test('Drive production migration disabled and settings load failures never fake success', async ({ page }) => {
   const mock = await mockWorkspace(page, { mode: 'production', storageBackend: 'drive', generation: null, canBackup: false, canRestore: false });
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await expect(page.getByRole('tabpanel', { name: 'Backup and recovery' }).getByText('Firestore migration is not enabled.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Back up now to Drive' })).toBeDisabled();
   await expect(page.getByLabel('Enable weekly backups')).toBeDisabled();
@@ -379,7 +380,7 @@ test('conflict prepares and resolutions retain original generation and exact ret
 
 test('ordinary production users can back up but cannot restore or change the schedule', async ({ page }) => {
   await mockWorkspace(page, { mode: 'production', canRestore: false });
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await expect(page.getByText('Restore and schedule changes require a recovery administrator.', { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Back up now to Drive' })).toBeEnabled();
   await expect(page.getByLabel('Enable weekly backups')).toBeDisabled();
@@ -400,7 +401,7 @@ test('legacy JSON archives use raw archive transport and restore headers, not mu
   };
   // A local Drive-like demo may simulate recovery when the backend advertises the capability.
   mock.state.generation = 'local-generation';
-  await page.goto('/settings');
+  await page.goto('/settings?tab=backup');
   await page.getByLabel('Or upload a ZIP or legacy JSON archive').setInputFiles({ name: 'legacy.json', mimeType: 'application/json', buffer: bytes });
   await page.getByRole('button', { name: 'Preview and validate backup' }).click();
   await page.getByLabel('Type RESTORE to confirm full rollback').fill('RESTORE');

@@ -3,7 +3,7 @@ import type { APIRequestContext, Page } from '@playwright/test';
 import type { ManufacturingDetail } from '../src/manufacturing-types';
 
 async function create(page: Page, kind: string, name: string, extra: () => Promise<void> = async () => {}) {
-  const singular = kind === 'partners' || kind === 'companies' ? 'supplier' : kind.slice(0, -1);
+  const singular = kind === 'suppliers' || kind === 'companies' ? 'supplier' : kind.slice(0, -1);
   await page.goto(`/manufacturing/${kind}`);
   await page.getByRole('button', { name: `New ${singular}`, exact: true }).click();
   const form = page.getByRole('dialog');
@@ -20,10 +20,10 @@ async function addStep(page: Page, name: string) {
   await page.getByRole('dialog').getByRole('button', { name: 'Add operation', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
 }
-async function assign(page: Page, operation: string, partner: string, contact?: string) {
+async function assign(page: Page, operation: string, supplier: string, contact?: string) {
   const step = page.locator('.bt-step').filter({ has: page.getByRole('link', { name: operation, exact: true }) });
   await step.getByRole('button', { name: 'Assign supplier', exact: true }).click();
-  await page.getByLabel('Manufacturing supplier', { exact: true }).selectOption({ label: partner });
+  await page.getByLabel('Manufacturing supplier', { exact: true }).selectOption({ label: supplier });
   if (contact) await page.getByLabel('Company contact (optional)', { exact: true }).selectOption({ label: contact });
   await page.getByRole('dialog').getByRole('button', { name: 'Assign supplier', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -32,6 +32,17 @@ async function snapshot(request: APIRequestContext, url: string) {
   const id = new URL(url).pathname.split('/').at(-1);
   return await (await request.get(`/api/manufacturing/products/${id}`)).json() as ManufacturingDetail;
 }
+
+test('old supplier bookmarks open the canonical supplier pages', async ({ page }) => {
+  const supplier = await create(page, 'suppliers', 'Bookmarked supplier');
+  const id = new URL(supplier).pathname.split('/').at(-1);
+  await page.goto(`/manufacturing/partners/${id}`);
+  await expect(page).toHaveURL(supplier);
+  await expect(page.getByRole('heading', { name: 'Bookmarked supplier', exact: true })).toBeVisible();
+  await page.goto('/manufacturing/partners');
+  await expect(page).toHaveURL(/\/manufacturing\/suppliers$/);
+  await expect(page.getByRole('heading', { name: 'Suppliers', exact: true })).toBeVisible();
+});
 
 test('a product shows its part number and a retryable one-click Drive folder link', async ({ page, context }) => {
   const driveUrl = 'https://drive.google.com/drive/folders/test-product-folder';
@@ -69,13 +80,13 @@ test('connected directories, product-specific operations, primary replacement an
   page.on('pageerror', e => errors.push(e.message));
   const operations = ['Raw material procurement', 'Laser cutting', 'Logo printing', 'Galvanization', 'Inspection'];
   for (const name of operations) await create(page, 'operations', name);
-  const companyA = await create(page, 'partners', 'Company A');
-  await create(page, 'partners', 'Company B');
-  await create(page, 'partners', 'Independent specialist', async () => {
+  const companyA = await create(page, 'suppliers', 'Company A');
+  await create(page, 'suppliers', 'Company B');
+  await create(page, 'suppliers', 'Independent specialist', async () => {
     await page.getByLabel('Supplier type', { exact: true }).selectOption('individual');
     await page.getByLabel('Phone', { exact: true }).fill('100200300');
   });
-  await create(page, 'partners', 'JSD', async () => { await page.getByLabel('Relationship', { exact: true }).selectOption('internal'); });
+  await create(page, 'suppliers', 'JSD', async () => { await page.getByLabel('Relationship', { exact: true }).selectOption('internal'); });
   const contact = await create(page, 'contacts', 'Alex at A', async () => {
     await page.getByLabel('Company supplier', { exact: true }).selectOption({ label: 'Company A' });
   });
@@ -115,7 +126,7 @@ test('connected directories, product-specific operations, primary replacement an
   const bracket = await create(page, 'products', 'Bracket');
   await addStep(page, 'Laser cutting');
   await assign(page, 'Laser cutting', 'Company B');
-  expect((await snapshot(request, bracket)).partners.map(p => p.name)).toEqual(['Company B']);
+  expect((await snapshot(request, bracket)).suppliers.map(p => p.name)).toEqual(['Company B']);
   expect((await snapshot(request, gear)).assignments).toEqual(before.assignments);
   await page.goto(companyA);
   await expect(page.getByRole('heading', { name: 'Company contacts', exact: true })).toBeVisible();
@@ -268,7 +279,7 @@ test('an unconfirmed inline operation retries without losing the product draft o
   expect(operations.total).toBe(1);
 });
 
-test('products show editable Part numbers and search by either name or ID', async ({ page, request }) => {
+test('products show editable Part numbers and search by either name or part number', async ({ page, request }) => {
   const product = await create(page, 'products', 'Searchable Precision Gear', async () => {
     await page.getByLabel('Part number', { exact: true }).fill('PID-572');
   });

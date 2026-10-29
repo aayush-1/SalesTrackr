@@ -2,7 +2,6 @@ param(
     [Parameter(Mandatory = $true)][string]$ProjectId,
     [Parameter(Mandatory = $true)][string]$Region,
     [string]$Service = 'salestrackr',
-    [string]$DriveTokenFile = '.secrets\drive-token-producttrackr-authorized.json',
     [switch]$Apply
 )
 
@@ -12,9 +11,9 @@ $Config = Get-Content -Raw (Join-Path $Root 'producttrackr.production.json') | C
 if ($ProjectId.StartsWith('demo-')) {
     throw 'Use the existing production Firestore project.'
 }
-Write-Output "ProductTrackr: project=$ProjectId database=$($Config.database) root=$($Config.driveRootId)"
+Write-Output "ProductTrackr: project=$ProjectId database=$($Config.database), shared SalesTrackr Drive root"
 if (-not $Apply) {
-    Write-Output 'Plan only: reuse the existing database and prepare indexes, runtime IAM and the Drive secret.'
+    Write-Output 'Plan only: reuse the existing database, Drive root and authorization; prepare indexes and IAM.'
     Write-Output 'No application revision, traffic, SalesTrackr settings or local data will be changed.'
     Write-Output 'Run again with -Apply after reviewing the production deployment guide.'
     return
@@ -26,34 +25,33 @@ function Invoke-Cloud {
     return $Result
 }
 
-$TokenPath = (Resolve-Path $DriveTokenFile).Path
 $Existing = Invoke-Cloud run services describe $Service "--region=$Region" --format=json | ConvertFrom-Json
 if ($Existing.metadata.annotations.'run.googleapis.com/iap-enabled' -ne 'true') {
     throw 'The existing Cloud Run service must keep IAP enabled.'
 }
 $Runtime = $Existing.spec.template.spec.serviceAccountName
 if (-not $Runtime) { throw 'The existing service must have an explicit runtime service account.' }
-$SalesFolders = @($Existing.spec.template.spec.containers[0].env |
-    Where-Object { $_.name -in @('GOOGLE_FOLDER_ID', 'BACKUP_DRIVE_FOLDER_ID') } |
-    ForEach-Object { $_.value })
-if ($Config.driveRootId -in $SalesFolders) { throw 'ProductTrackr must not use a SalesTrackr Drive folder.' }
-if ($Config.database -eq '(default)') {
-    $SalesProject = ($Existing.spec.template.spec.containers[0].env |
-        Where-Object name -eq 'FIRESTORE_PROJECT_ID').value
-    $SalesDatabase = ($Existing.spec.template.spec.containers[0].env |
-        Where-Object name -eq 'FIRESTORE_DATABASE_ID').value
-    if ($SalesProject -ne $ProjectId -or ($SalesDatabase -and $SalesDatabase -ne '(default)')) {
-        throw 'The shared default database must be the existing SalesTrackr database.'
-    }
+$Environment = @{}
+foreach ($Item in $Existing.spec.template.spec.containers[0].env) { $Environment[$Item.name] = $Item }
+$SalesDatabase = $Environment['FIRESTORE_DATABASE_ID'].value
+if (-not $SalesDatabase) { $SalesDatabase = '(default)' }
+if ($Environment['STORAGE_BACKEND'].value -ne 'firestore' -or
+    $Environment['FIRESTORE_PROJECT_ID'].value -ne $ProjectId -or $SalesDatabase -ne $Config.database) {
+    throw 'Both Trackrs must use the existing SalesTrackr Firestore database.'
+}
+$SalesRoot = $Environment['GOOGLE_FOLDER_ID'].value
+$SalesBackups = $Environment['BACKUP_DRIVE_FOLDER_ID'].value
+$SharedSecret = $Environment['GOOGLE_TOKEN_JSON'].valueFrom.secretKeyRef
+if (-not $SalesRoot -or -not $SalesBackups -or $SalesRoot -eq $SalesBackups -or
+    -not $SharedSecret.name -or $SharedSecret.key -notmatch '^[1-9][0-9]*$') {
+    throw 'Keep SalesTrackr root, dedicated Backups folder and existing pinned Drive credential.'
 }
 Invoke-Cloud services enable firestore.googleapis.com secretmanager.googleapis.com firebaserules.googleapis.com |
     Out-Null
 $Databases = @(Invoke-Cloud firestore databases list --format=json | ConvertFrom-Json)
 $Database = $Databases | Where-Object { $_.name -eq "projects/$ProjectId/databases/$($Config.database)" }
 if (-not $Database) {
-    if ($Config.database -eq '(default)') { throw 'The existing shared database was not found.' }
-    Invoke-Cloud firestore databases create "--database=$($Config.database)" "--location=$Region" `
-        --edition=standard --type=firestore-native --delete-protection | Out-Null
+    throw 'The existing shared SalesTrackr database was not found.'
 } elseif ($Database.type -ne 'FIRESTORE_NATIVE') {
     throw 'The ProductTrackr database must use Firestore Native mode.'
 }
@@ -68,30 +66,6 @@ if (-not $Access) {
     Invoke-Cloud projects add-iam-policy-binding $ProjectId "--member=serviceAccount:$Runtime" `
         --role=roles/datastore.user "--condition=$Condition" | Out-Null
 }
-
-$Secrets = @(Invoke-Cloud secrets list --format=json | ConvertFrom-Json)
-if (-not ($Secrets | Where-Object { $_.name.EndsWith("/secrets/$($Config.driveSecret)") })) {
-    Invoke-Cloud secrets create $Config.driveSecret --replication-policy=automatic | Out-Null
-}
-$Versions = @(Invoke-Cloud secrets versions list $Config.driveSecret --format=json |
-    ConvertFrom-Json)
-$Version = $Versions | Where-Object { $_.name.EndsWith("/versions/$($Config.driveSecretVersion)") }
-if ($Version) {
-    if ($Version.state -ne 'ENABLED') { throw 'The configured secret version is not enabled.' }
-} else {
-    $Highest = 0
-    foreach ($Item in $Versions) { $Highest = [Math]::Max($Highest, [int]($Item.name.Split('/')[-1])) }
-    if ([int]$Config.driveSecretVersion -ne ($Highest + 1)) {
-        throw 'Set driveSecretVersion to the next numeric version before uploading the credential.'
-    }
-    $Added = Invoke-Cloud secrets versions add $Config.driveSecret "--data-file=$TokenPath" --format=json |
-        ConvertFrom-Json
-    if (-not $Added.name.EndsWith("/versions/$($Config.driveSecretVersion)")) {
-        throw 'The uploaded version does not match producttrackr.production.json; retain it and review.'
-    }
-}
-Invoke-Cloud secrets add-iam-policy-binding $Config.driveSecret "--member=serviceAccount:$Runtime" `
-    --role=roles/secretmanager.secretAccessor | Out-Null
 
 function Index-Key($Index) {
     $Group = if ($Index.collectionGroup) { $Index.collectionGroup } else {

@@ -60,10 +60,12 @@ def unchanged(repo, before):
 
 def test_workbook_preserves_every_directory_relationship_and_literal_value(process):
     client, settings, product, company, contact, other_company, other_contact, individual = process
-    unused = create(client, "products", name="Unused product", reference=product["reference"])
+    unused = create(client, "products", name="Unused product", partNumber=product["partNumber"])
     operation = create(client, "operations", name="Unused operation", description='=HYPERLINK("bad","bad")')
-    lone = create(client, "partners", name="Standalone supplier", phone="0012345678")
-    unlinked = create(client, "contacts", name="Unlinked contact", partnerId=company["id"], phone="+91 01234")
+    lone = create(client, "suppliers", name="Standalone supplier", phone="0012345678")
+    unlinked = create(
+        client, "contacts", name="Unlinked contact", supplierId=company["id"], phone="+91 01234",
+    )
     current = detail(client, product)["entity"]
     command(
         client,
@@ -90,6 +92,7 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
     ]
     products = {row["Product key"]: row for row in rows(book, "Products")}
     assert set(products) == {product["id"], unused["id"]}
+    assert products[product["id"]]["Part number"] == product["partNumber"]
     assert products[unused["id"]]["Process"] == "No operations"
     assert products[product["id"]]["Operations (in order)"] == "1. Machining\n2. Machining\n3. Machining"
     route = rows(book, "Product operations")
@@ -106,23 +109,23 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
         and individual["name"] in row["Available suppliers"]
         for row in route
     )
-    partner_links = rows(book, "Supplier links")
-    assert {row["Link key"] for row in partner_links} == before["assignments"].keys()
-    for row in partner_links:
+    supplier_links = rows(book, "Supplier links")
+    assert {row["Link key"] for row in supplier_links} == before["assignments"].keys()
+    for row in supplier_links:
         original = before["assignments"][row["Link key"]]
         assert row["Product key"] == original["productId"] and row["Step key"] == original["stepId"]
-        assert row["Supplier key"] == original["partnerId"]
+        assert row["Supplier key"] == original["supplierId"]
         assert (row["Contact key"] or None) == original["contactId"]
-        assert row["Primary"] == ("Yes" if original["partnerId"] == company["id"] else "No")
+        assert row["Primary"] == ("Yes" if original["supplierId"] == company["id"] else "No")
     assert {row["Contact key"] for row in rows(book, "Contacts")} == {
         contact["id"],
         other_contact["id"],
         unlinked["id"],
     }
-    partners = {row["Supplier key"]: row for row in rows(book, "Suppliers")}
-    assert partners[other_company["id"]]["Relationship"] == "internal"
-    assert partners[individual["id"]]["Type"] == "individual"
-    assert partners[lone["id"]]["Phone"] == "0012345678"
+    suppliers = {row["Supplier key"]: row for row in rows(book, "Suppliers")}
+    assert suppliers[other_company["id"]]["Relationship"] == "internal"
+    assert suppliers[individual["id"]]["Type"] == "individual"
+    assert suppliers[lone["id"]]["Phone"] == "0012345678"
     operations = rows(book, "Operations")
     index = next(index for index, row in enumerate(operations, 2) if row["Operation key"] == operation["id"])
     assert book["Operations"].cell(index, 2).value == '=HYPERLINK("bad","bad")'
@@ -164,7 +167,7 @@ def test_updates_same_workbook_without_stale_rows_or_growing_metadata(process):
     response, _ = command(
         client,
         f"/products/{product['id']}",
-        {"name": "Renamed product", "reference": product["reference"], "notes": "Updated report"},
+        {"name": "Renamed product", "partNumber": product["partNumber"], "notes": "Updated report"},
         product["version"],
         product["id"],
         "PUT",
@@ -204,9 +207,9 @@ def test_empty_workspace_exports_headers_without_seeding_entities(app):
 
 def test_products_sheet_contains_clickable_drive_links_before_and_after_restore(app):
     _, settings = app
-    configured = replace(settings, manufacturing_backup_folder_id="manufacturing-root")
+    configured = replace(settings, root_id="manufacturing-root")
     with TestClient(create_app(configured)) as client:
-        product = create(client, "products", name="Product with drawings", reference="PART-042")
+        product = create(client, "products", name="Product with drawings", partNumber="PART-042")
         unconnected = create(client, "products", name="Product without a folder")
         repo = ManufacturingRepository(configured)
         reference = repo.workspace.collection("productFolders").document(product["id"])
@@ -303,7 +306,7 @@ def test_export_fences_mutations_and_backups_until_verified(process):
         export(client, expected=503)
         assert (
             client.post(
-                "/api/manufacturing/backups",
+                "/api/backups",
                 json={"writeId": uuid4().hex},
                 headers=headers(client),
             ).status_code
@@ -470,7 +473,7 @@ def test_drive_mode_never_silently_falls_back_to_local_storage(app):
             replace(
                 settings,
                 manufacturing_backup_storage="drive",
-                manufacturing_backup_folder_id="configured-folder",
+                root_id="configured-folder",
             ),
         )
     assert client.get(PATH).json()["provider"] == "local"
