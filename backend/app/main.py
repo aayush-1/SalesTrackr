@@ -7,7 +7,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
-from google.api_core.exceptions import GoogleAPICallError
+from google.api_core.exceptions import Aborted, GoogleAPICallError
 from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import Response
@@ -105,6 +105,12 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             }},
             status_code=503,
         )
+
+    @app.exception_handler(ValueError)
+    async def transaction_retry_handler(request, error):
+        if not isinstance(error.__cause__, Aborted):
+            raise error
+        return await database_handler(request, error.__cause__)
 
     @app.exception_handler(Problem)
     async def problem_handler(request, error):

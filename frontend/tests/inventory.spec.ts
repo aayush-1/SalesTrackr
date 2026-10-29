@@ -90,6 +90,14 @@ test('real quantities, combined shortages, Dispatch retry/reversal, production a
   const attempts: unknown[] = [];
   await page.route(`**/api/records/${firstId}/stage`, async route => {
     attempts.push(route.request().postDataJSON());
+    if (attempts.length === 1) return route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: {
+        code: 'database_unavailable',
+        message: 'The database request could not be confirmed. Retry the same action.',
+      } }),
+    });
     const response = await route.fetch();
     expect(response.ok(), await response.text()).toBe(true);
     if (lose) { lose = false; return route.abort(); }
@@ -97,10 +105,14 @@ test('real quantities, combined shortages, Dispatch retry/reversal, production a
   });
   await page.getByRole('button', { name: 'Dispatched', exact: true }).click();
   await page.getByRole('button', { name: 'Mark stage reached', exact: true }).click();
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('Retry the same action');
+  expect((await product()).stockQuantity).toBe(10);
+  await page.getByRole('button', { name: 'Mark stage reached', exact: true }).click();
   await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible();
   await page.getByRole('button', { name: 'Mark stage reached', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  expect(attempts).toHaveLength(2); expect(attempts[0]).toEqual(attempts[1]);
+  expect(attempts).toHaveLength(3);
+  expect(attempts[0]).toEqual(attempts[1]); expect(attempts[1]).toEqual(attempts[2]);
   expect((await product()).stockQuantity).toBe(6);
   await page.unroute(`**/api/records/${firstId}/stage`);
   for (const [index, row] of remaining.entries()) {

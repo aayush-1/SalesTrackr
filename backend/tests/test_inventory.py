@@ -1,9 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from copy import deepcopy
+from threading import Barrier
+from time import sleep
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from google.api_core.exceptions import Aborted
+from google.cloud import firestore
 
 from backend.app.domain import RecordData, today
 from backend.app.inventory import source_key
@@ -240,12 +246,20 @@ def test_new_empty_sale_is_tracked_and_sent_corrections_are_net_and_atomic(inven
 def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(inventory):
     client, _, initial, _ = inventory
     supplier = process(inventory)
+    final_step = step(client, initial, create(client, "operations", name="Final inspection"))
+    response, _ = command(client, f"/steps/{final_step['id']}/assignments", {
+        "supplierId": supplier["id"],
+    }, final_step["version"])
+    assert response.status_code == 200, response.text
     current, _ = job(client, initial)
     response, _ = transition(client, current, "quantity", quantity=6, reason="Planned batch")
     assert response.status_code == 200, response.text
     current = record(client, current["id"])["record"]
     current = apply(client, current, "assign", supplierId=supplier["id"])
+    current = apply(client, current, "complete")
+    assert current["status"] == "ready"
     assert product(inventory)["stockQuantity"] == 10
+    current = apply(client, current, "assign", supplierId=supplier["id"])
     response, body = transition(client, current, "complete")
     assert response.status_code == 200, response.text
     assert command(client, f"/records/{current['id']}/complete", {}, body=body)[0].status_code == 200
@@ -266,6 +280,10 @@ def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(invent
     sent = ordered(inventory, quantity=15)
     advance(client, sent, "dispatched")
     current = record(client, current["id"])["record"]
+    response, _ = transition(client, current, "quantity", quantity=4, reason="Reduce completed output")
+    assert response.status_code == 409
+    assert record(client, current["id"])["record"] == current
+    assert product(inventory)["stockQuantity"] == 3
     response, _ = transition(
         client,
         current,
@@ -285,29 +303,124 @@ def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(invent
     assert product(inventory)["stockQuantity"] == 10
 
 
+def test_multi_product_dispatch_is_atomic_and_retries_after_replenishment(inventory):
+    client, settings, initial, _ = inventory
+    other = create(client, "products", name="Second dispatch product",
+                   stockQuantity=10, minimumStockQuantity=0)
+    available, insufficient = sorted((initial, other), key=lambda value: value["id"])
+    row = ordered(inventory, parts=[
+        {"id": uuid4().hex, "productId": available["id"], "quantity": 7},
+        {"id": uuid4().hex, "productId": insufficient["id"], "quantity": 11},
+    ])
+    before = [detail(client, value)["entity"] for value in (available, insufficient)]
+    repo = ManufacturingRepository(settings)
+    source_id = source_key("sale", row["entityId"])
+    source_before = repo.read("inventorySources", source_id)
+    movements_before = len(list(repo.collection("stockMovements").stream()))
+    body = {
+        "writeId": uuid4().hex, "entityId": row["entityId"], "baseRevision": row["id"],
+        "data": {"stage": "dispatched"},
+    }
+    route = f"/api/records/{row['entityId']}/stage"
+    response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "insufficient_stock"
+    assert [detail(client, value)["entity"] for value in (available, insufficient)] == before
+    assert repo.read("inventorySources", source_id) == source_before
+    assert len(list(repo.collection("stockMovements").stream())) == movements_before
+    assert "dispatched" not in client.app.state.repo.current(row["entityId"])["data"]["stageDates"]
+    response, _ = command(client, f"/products/{insufficient['id']}/stock", {
+        "stockQuantity": 11, "minimumStockQuantity": before[1]["minimumStockQuantity"],
+        "reason": "Replenish missing unit",
+    }, before[1]["version"], insufficient["id"])
+    assert response.status_code == 200, response.text
+    response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 200, response.text
+    retry = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert retry.status_code == 200 and retry.json()["revision"] == response.json()["revision"]
+    assert [detail(client, value)["entity"]["stockQuantity"]
+            for value in (available, insufficient)] == [3, 0]
+    assert shortages(client) == []
+
+
 def test_concurrent_dispatch_cannot_oversell(inventory):
     client, settings, _, _ = inventory
     rows = [ordered(inventory, quantity=7) for _ in range(2)]
+    start = Barrier(2)
 
-    def dispatch(row):
-        with TestClient(create_app(settings)) as other:
-            body = {
-                "writeId": uuid4().hex,
-                "entityId": row["entityId"],
-                "baseRevision": row["id"],
-                "data": {"stage": "dispatched"},
-            }
-            return other.post(
+    def dispatch(values):
+        index, other, row = values
+        body = {
+            "writeId": uuid4().hex,
+            "entityId": row["entityId"],
+            "baseRevision": row["id"],
+            "data": {"stage": "dispatched"},
+        }
+        start.wait(timeout=10)
+        for attempt in range(3):
+            response = other.post(
                 f"/api/records/{row['entityId']}/stage",
                 json=body,
                 headers=headers(other.app.state.repo),
-            ).status_code
+            )
+            if response.status_code != 503:
+                return response.status_code
+            assert response.json()["error"]["code"] == "database_unavailable"
+            sleep(1 + index + attempt)
+        raise AssertionError("Concurrent dispatch did not recover from transaction contention.")
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(dispatch, rows))
+    with ExitStack() as stack:
+        clients = [stack.enter_context(TestClient(create_app(settings))) for _ in rows]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(dispatch, zip(range(2), clients, rows)))
     assert sorted(results) == [200, 409]
     assert product(inventory)["stockQuantity"] == 3
     assert shortages(client)[0]["missingQuantity"] == 4
+
+
+def test_exhausted_dispatch_transaction_is_retryable_with_the_same_write(inventory):
+    client, _, _, _ = inventory
+    row = ordered(inventory, quantity=7)
+    body = {
+        "writeId": uuid4().hex,
+        "entityId": row["entityId"],
+        "baseRevision": row["id"],
+        "data": {"stage": "dispatched"},
+    }
+    original = firestore.transactional
+
+    def exhausted(function):
+        if function.__name__ != "apply":
+            return original(function)
+
+        def fail(transaction):
+            raise ValueError("Failed to commit transaction in 5 attempts.") from Aborted(
+                "Lock timeout."
+            )
+
+        return fail
+
+    route = f"/api/records/{row['entityId']}/stage"
+    with patch("backend.app.firestore_storage.firestore.transactional", side_effect=exhausted):
+        response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "database_unavailable"
+    assert product(inventory)["stockQuantity"] == 10
+    assert "dispatched" not in client.app.state.repo.current(row["entityId"])["data"]["stageDates"]
+    response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 200, response.text
+    retried = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert retried.status_code == 200 and retried.json()["revision"] == response.json()["revision"]
+    assert product(inventory)["stockQuantity"] == 3
+
+
+def test_unrelated_value_error_is_not_reported_as_retryable(inventory):
+    client, _, _, _ = inventory
+    row = ordered(inventory)
+    with patch.object(client.app.state.repo, "commit", side_effect=ValueError("Unrelated failure")):
+        with pytest.raises(ValueError, match="Unrelated failure"):
+            advance(client, row, "dispatched")
+    assert product(inventory)["stockQuantity"] == 10
 
 
 def test_legacy_and_manual_delivery_do_not_replay_stock(inventory):
