@@ -42,6 +42,8 @@ FILES = {
     "manufacturingRecordEvents": "activity-history.json",
     "sequences": "number-counters.json",
     "writes": "write-receipts.json",
+    "inventorySources": "inventory-sources.json",
+    "stockMovements": "stock-movements.json",
 }
 RESERVED = {
     "datasets", "backups", "backupOperations", "restoreOperations", "cleanupOperations", "productFolders",
@@ -106,6 +108,10 @@ def checked_record(record, collections):
     validate_value(Name, record["productName"])
     validate_value(Text, record["productPartNumber"])
     validate_value(Text, record["notes"])
+    if record.get("quantity") is not None:
+        from .domain import PartQuantity
+
+        validate_value(PartQuantity, record["quantity"])
     steps = record["operations"]
     if not isinstance(steps, list) or not 1 <= len(steps) <= 100:
         raise ValueError("Invalid operation route.")
@@ -183,7 +189,7 @@ def checked_record(record, collections):
         raise ValueError("The stored work-in-process projections are inconsistent.")
 
 
-def checked_data(data):
+def checked_data(data, *, directories_only=False):
     try:
         if canonical_data(data) != data:
             raise ValueError("Snapshots must use current manufacturing names.")
@@ -203,7 +209,8 @@ def checked_data(data):
                 identifier(key)
                 if not isinstance(row, dict):
                     raise ValueError("Invalid document.")
-                if kind not in ("sequences", "writes", "manufacturingRecordEvents"):
+                if kind not in ("sequences", "writes", "manufacturingRecordEvents",
+                                "inventorySources", "stockMovements"):
                     entity_metadata(key, row)
         if "productFolders" in data:
             folders = data["productFolders"]
@@ -232,9 +239,10 @@ def checked_data(data):
                 ids.add(mapping["id"])
         for kind, model in MODELS.items():
             for row in data[kind].values():
-                if not set(model.model_fields).issubset(row):
+                required = set(model.model_fields) - {"modelIds", "stockQuantity", "minimumStockQuantity"}
+                if not required.issubset(row):
                     raise ValueError("Incomplete master entity.")
-                model.model_validate({key: row[key] for key in model.model_fields})
+                model.model_validate({key: row[key] for key in model.model_fields if key in row})
                 if row["nameKey"] != row["name"].casefold():
                     raise ValueError("Invalid name index.")
         for product in data["products"].values():
@@ -276,6 +284,10 @@ def checked_data(data):
             ):
                 raise ValueError("Invalid operation or primary supplier.")
         numbers, events = set(), {}
+        from .inventory import checked_inventory
+
+        if not directories_only:
+            checked_inventory(data)
         for key, record in data["manufacturingRecords"].items():
             checked_record(record, data)
             if record["number"] in numbers:
@@ -289,11 +301,13 @@ def checked_data(data):
                 or type(event["sequence"]) is not int
                 or not 1 <= event["sequence"] <= record["version"]
                 or event["sequence"] in events[event["recordId"]]
-                or event["action"] not in ("create", "assign", "reassign", "complete", "undo", "cancel")
+                or event["action"] not in (
+                    "create", "assign", "reassign", "complete", "undo", "cancel", "quantity",
+                )
                 or (event["sequence"] == 1) != (event["action"] == "create")
             ):
                 raise ValueError("Invalid activity history.")
-            if event["action"] not in ("create", "cancel") and event["stepId"] not in {
+            if event["action"] not in ("create", "cancel", "quantity") and event["stepId"] not in {
                 step["id"] for step in record["operations"]
             }:
                 raise ValueError("History references an unknown operation.")
@@ -308,8 +322,16 @@ def checked_data(data):
             for field in ("note", "reason"):
                 if field in event:
                     validate_value(Text, event[field])
-            if event["action"] in ("reassign", "undo", "cancel") and not event.get("reason", "").strip():
+            if event["action"] in ("reassign", "undo", "cancel", "quantity") and not event.get(
+                "reason", "",
+            ).strip():
                 raise ValueError("Missing correction reason.")
+            if event["action"] == "quantity":
+                from .domain import PartQuantity
+
+                validate_value(PartQuantity, event["quantity"])
+                if event.get("previousQuantity") is not None:
+                    validate_value(PartQuantity, event["previousQuantity"])
             events[event["recordId"]].add(event["sequence"])
         for key, record in data["manufacturingRecords"].items():
             if len(events[key]) != record["version"]:

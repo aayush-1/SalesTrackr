@@ -2,7 +2,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from .domain import Identifier, Model, Name, Text
+from .domain import Identifier, Model, Name, StockQuantity, Text
 
 Directory = Literal["products", "operations", "suppliers", "contacts"]
 
@@ -11,6 +11,26 @@ class Product(Model):
     name: Name
     partNumber: Text = ""
     notes: Text = ""
+    modelIds: list[Identifier] = Field(default_factory=list, max_length=100)
+    stockQuantity: StockQuantity | None = None
+    minimumStockQuantity: StockQuantity | None = None
+
+    @model_validator(mode="after")
+    def distinct_models(self):
+        if len(set(self.modelIds)) != len(self.modelIds):
+            raise ValueError("Choose each machine model only once.")
+        return self
+
+
+class NewProduct(Product):
+    stockQuantity: StockQuantity
+    minimumStockQuantity: StockQuantity
+
+
+class StockAdjustment(Model):
+    stockQuantity: StockQuantity
+    minimumStockQuantity: StockQuantity
+    reason: Text = Field(min_length=1)
 
 
 class Operation(Model):

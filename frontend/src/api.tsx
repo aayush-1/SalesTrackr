@@ -63,6 +63,28 @@ export const RefreshContext = createContext<{
   version: number; lastSave: Save<unknown> | null; refresh: (saved?: Save<unknown>) => void;
 }>({ version: 0, lastSave: null, refresh: () => {} });
 
+export function usePdfDownload(path: string, filename: string) {
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const download = async () => {
+    setBusy(true); setError('');
+    try {
+      const response = await fetch(`/api${path}`, { headers: { 'X-SalesTrackr-Request': '1' } });
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error?.message || 'The PDF could not be created.');
+      }
+      if (!response.headers.get('Content-Type')?.startsWith('application/pdf')) throw new Error('The server did not return a PDF. Refresh and retry.');
+      const url = URL.createObjectURL(await response.blob()), anchor = document.createElement('a');
+      anchor.href = url; anchor.download = filename; document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The PDF could not be downloaded. Try again.');
+    } finally { setBusy(false); }
+  };
+  useEffect(() => { setError(''); }, [path]);
+  return { busy, error, download };
+}
+
 function savedResource<T>(path: string, current: T | null, saved: Save<unknown> | null): T | null {
   if (!current || !saved?.revisionIsCurrent || saved.warning || !saved.complete) return null;
   if (path === '/status') {

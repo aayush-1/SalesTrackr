@@ -27,7 +27,13 @@ MAX_BYTES = 32 * 1024 * 1024
 MAX_CELLS = 200_000
 
 
-def workbook(data, identity):
+def workbook(data, identity, model_names=None):
+    model_names = model_names or {}
+    if any(model_id not in model_names for product in data["products"].values()
+           for model_id in product.get("modelIds", [])):
+        raise Problem(
+            "A linked machine model is unavailable. Refresh before exporting.", 409, "model_missing",
+        )
     # Reuse the graph validator without reading or exporting execution collections.
     try:
         checked_data(
@@ -35,7 +41,8 @@ def workbook(data, identity):
                 **{kind: data[kind] if kind in KINDS else {} for kind in FILES},
                 "settings": {"weeklyEnabled": True},
                 **({"productFolders": data["productFolders"]} if "productFolders" in data else {}),
-            }
+            },
+            directories_only=True,
         )
     except Problem:
         raise Problem(
@@ -145,7 +152,7 @@ def workbook(data, identity):
         "Products",
         [
             "Part number", "Product", "Operations (in order)", "Process",
-            "Notes", "Drive folder", "Product key",
+            "Models", "Stock quantity", "Minimum stock quantity", "Notes", "Drive folder", "Product key",
         ],
         [
             [
@@ -158,6 +165,10 @@ def workbook(data, identity):
                 ref("View process", "Product operations", product["stepIds"][0])
                 if product["stepIds"]
                 else "No operations",
+                ", ".join(model_names[key] for key in product["modelIds"])
+                if product.get("modelIds") else "Common",
+                product.get("stockQuantity"),
+                product.get("minimumStockQuantity"),
                 product["notes"],
                 (folder["url"], folder["url"]) if folder else "",
                 product["id"],
@@ -668,7 +679,16 @@ class SpreadsheetExport:
                 "sourceSequence": control["sequence"],
                 "exportedAt": now(),
             }
-            content = workbook(data, identity)
+            from .firestore_storage import FirestoreRepository
+
+            sales = FirestoreRepository(self.settings, client=self.repo.client)
+            before = sales.workspace.get().to_dict()
+            model_names = {row["entityId"]: row["data"]["name"] for row in sales.list("model")}
+            after = sales.workspace.get().to_dict()
+            if any(before[key] != after[key] for key in ("generation", "sequence")):
+                raise Problem("Models changed during export. Retry the export.", 409, "models_changed")
+            identity.update(salesGeneration=before["generation"], salesSequence=before["sequence"])
+            content = workbook(data, identity, model_names)
             with self.repo.lock:
                 self._update(owner, {})
                 self.store.put(

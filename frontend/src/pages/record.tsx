@@ -1,16 +1,18 @@
 import { useContext, useEffect, useRef, useState } from 'react';
-import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, MessageSquareText, PackageCheck, Pencil, Plus } from 'lucide-react';
+import { ArchiveX, ArrowRight, Building2, CalendarDays, Check, CircleDollarSign, Clock3, History, MessageSquareText, Pencil, Plus } from 'lucide-react';
 import { Link, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router-dom';
 import { allAccounts, RefreshContext, useResource, useSave } from '../api';
 import { Alert, Back, Field, Loading, Modal, PageHeader, PaymentBadge, SaveButton, StageBadge, Timeline, TrackedForm, formValues, markFormSaved } from '../components';
 import { currentStage, formatDate, labels, stages } from '../types';
-import type { Account, Contact, Me, Page, RecordWorkspace, Revision, SalesRecord } from '../types';
+import type { Account, Contact, Me, Page, RecordWorkspace, Revision, SalePart, SalesRecord } from '../types';
 import { AccountForm } from './accounts';
+import { PartLines, SalesPartsPanel } from './sales-parts';
 
 export function NewRecordPage() {
   const [query] = useSearchParams();
   const [accountId, setAccountId] = useState(query.get('accountId') || '');
   const [contactId, setContactId] = useState('');
+  const [parts, setParts] = useState<SalePart[]>([]);
   const [accounts, setAccounts] = useState<Revision<Account>[]>([]);
   const [accountError, setAccountError] = useState('');
   const [newAccount, setNewAccount] = useState(false);
@@ -35,13 +37,16 @@ export function NewRecordPage() {
       const get = formValues(e);
       const result = await save('/records', {
         accountId, contactId: get('contactId') || null, productNotes: get('productNotes'),
-        notes: get('notes'), acquiredOn: get('acquiredOn') || null, quotationReference: '',
+        notes: get('notes'), acquiredOn: get('acquiredOn') || null, quotationReference: '', parts,
       });
       if (result) { markFormSaved(form); navigate(`/records/${result.revision.entityId}`, { state: { notice: result.warning } }); }
     }}>
       <div className="form-section-title"><span>01</span><div><h2>Who is the enquiry for?</h2><p>Select an existing customer or create an account here.</p></div></div>
       <div className="form-grid">
-        <Field label="Account *"><select required value={accountId} onChange={e => { setAccountId(e.target.value); setContactId(''); }}><option value="">Select a company</option>{accounts.map(a => <option key={a.entityId} value={a.entityId}>{a.data.name}{a.data.address ? ` - ${a.data.address}` : ''}</option>)}</select></Field>
+        <Field label="Account *"><select required value={accountId} onChange={e => {
+          if (parts.length && !window.confirm('Switch account and clear these part selections?')) return;
+          setAccountId(e.target.value); setContactId(''); setParts([]);
+        }}><option value="">Select a company</option>{accounts.map(a => <option key={a.entityId} value={a.entityId}>{a.data.name}{a.data.address ? ` - ${a.data.address}` : ''}</option>)}</select></Field>
         <div className="inline-new"><button type="button" className="button" onClick={() => setNewAccount(true)}><Plus size={16} />Create a new account</button></div>
         <Field label="Contact person (optional)"><select name="contactId" value={contactId} onChange={e => setContactId(e.target.value)} disabled={!accountId}><option value="">No contact selected</option>{contacts.data?.items.map(c => <option value={c.entityId} key={c.entityId}>{c.data.name}</option>)}</select></Field>
         <Field label="Lead acquired date" hint="Leave blank to use today. Enter an actual date for an older enquiry."><input name="acquiredOn" type="date" max={me?.today} /></Field>
@@ -52,6 +57,7 @@ export function NewRecordPage() {
         <Field label="Product / requirement notes" wide><textarea name="productNotes" rows={5} maxLength={10000} placeholder="Part names, part numbers, quantities, specifications, sample requirements..." /></Field>
         <Field label="General notes" wide><textarea name="notes" rows={3} maxLength={10000} placeholder="Other context or customer requests" /></Field>
       </div>
+      {me?.manufacturingEnabled && <div className="note-block"><h3>Catalog parts (optional)</h3><PartLines accountId={accountId} parts={parts} onChange={setParts} /></div>}
       <div className="info-note"><Check size={17} />New lead will be your first green stage. Quotation, order, and payment details come later.</div>
       {error && <Alert>{error}</Alert>}<div className="form-footer"><Link to="/records">Cancel</Link><SaveButton busy={busy}>Create sales record</SaveButton></div>
     </TrackedForm>
@@ -107,10 +113,9 @@ function ActionForm({ row, action, done }: { row: Revision<SalesRecord>; action:
             {(action === 'stage' ? [next] : stages.slice(0, stages.indexOf(current) + 1)).filter(Boolean).map(s => <option value={s} key={s}>{labels[s]}</option>)}
           </select>
         </Field>
-        <Field label="Actual stage date" hint="If blank, today is recorded."><input key={target} name="occurredOn" type="date" max={me?.today}
-          defaultValue={action === 'correction' && target === 'order_received' && data.stockUpdated ? data.stageDates.order_received : undefined} /></Field>
+        <Field label="Actual stage date" hint="If blank, today is recorded."><input key={target} name="occurredOn" type="date" max={me?.today} /></Field>
         {target === 'follow_up' && <Field label="Quotation number (optional)"><input name="quotationReference" maxLength={100} defaultValue={data.quotationReference} placeholder="e.g. Q-2026-001" /></Field>}
-        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history. This corrects a recording error; it is not a return or cancellation.{data.feedbackReceived && ' Undo feedback received before reopening this record.'}{data.stockUpdated && ' To undo stock confirmation, first return to Order in hand using its original date. Undo stock before removing order confirmation.'}</Alert></div></>}
+        {action === 'correction' && <><Field label="Correction reason *" wide><textarea name="reason" required maxLength={10000} rows={3} /></Field><div className="wide"><Alert tone="warning">Later stages will return to grey. Their old dates remain in history.{data.inventoryTracked && data.stageDates.dispatched && ' Returning to Order in hand or earlier restores the deducted stock.'}{data.feedbackReceived && ' Undo feedback received before reopening this record.'}</Alert></div></>}
       </>}
       {action === 'followup' && <>
         <Field label="Follow-up note *" wide><textarea name="note" required rows={4} maxLength={10000} placeholder="What was discussed? What happens next?" /></Field>
@@ -177,40 +182,6 @@ function PaymentPanel({ row, note, onNoteChange, done, actions }: RecordPanelPro
   </section>;
 }
 
-function StockPanel({ row, done, actions }: RecordPanelProps) {
-  const record = row.data;
-  const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
-  const ordered = !!record.stageDates.order_received;
-  const dispatched = !!record.stageDates.dispatched;
-  const persist = async (updated: boolean) => {
-    if (!actions.begin()) return;
-    try {
-      const result = await save(`/records/${row.entityId}/stock`, { updated });
-      if (result) done(result.warning);
-    } finally { actions.end(); }
-  };
-  return <section className="panel stock-panel" aria-label="Stock update">
-    <div className="section-heading compact"><h2><PackageCheck size={20} /> Stock update</h2>
-      <span className={`badge ${record.stockUpdated ? 'paid' : 'unpaid'}`}>{record.stockUpdated ? 'Updated' : 'Pending'}</span>
-    </div>
-    <p className="help-text">{record.stockUpdated
-      ? `Updated on ${formatDate(record.stockUpdatedOn)}.`
-      : ordered ? 'Confirm once your stock records have been updated for this order.' : 'Available after Order in hand.'}</p>
-    <p className="help-text">Required before dispatch. This confirmation does not change stock quantities or advance the sales stage automatically.</p>
-    {error && <Alert>{error}</Alert>}
-    {!record.discarded && <>
-      <div className="form-footer"><button type="button" className="button primary"
-        disabled={busy || actions.busy || !ordered || !!record.stockUpdated} onClick={() => void persist(true)}>
-        <Check size={16} />{busy ? 'Saving...' : 'Stock updated'}
-      </button></div>
-      {record.stockUpdated && !dispatched && <button type="button" className="text-button" disabled={busy || actions.busy} onClick={() => void persist(false)}>Undo stock updated</button>}
-      {record.stockUpdated && dispatched && <p className="help-text">Correct this record back to Order in hand before undoing stock confirmation.</p>}
-      {ordered && !record.stockUpdated && <p className="help-text"><Link to="/view/stock-pending">View stock update pending</Link></p>}
-    </>}
-    {record.discarded && <p className="help-text">Stock update state retained at discard. This record is read-only.</p>}
-  </section>;
-}
-
 function FeedbackPanel({ row, done, actions }: RecordPanelProps) {
   const record = row.data;
   const { save, busy, error } = useSave<SalesRecord>('record', row.entityId, row.id);
@@ -253,7 +224,6 @@ function RecordHistory({ id }: { id: string }) {
           {row.data.stageDates.quotation_pending && <div><dt>Quotation pending (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_pending)}</dd></div>}
           {row.data.stageDates.quotation_sent && <div><dt>Quotation sent (earlier workflow)</dt><dd>{formatDate(row.data.stageDates.quotation_sent)}</dd></div>}
           <div><dt>Quotation number</dt><dd>{row.data.quotationReference || 'Not added'}</dd></div>
-          <div><dt>Stock update</dt><dd>{row.data.stockUpdated ? `Updated on ${formatDate(row.data.stockUpdatedOn)}` : 'Not confirmed'}</dd></div>
           <div><dt>Feedback</dt><dd>{row.data.feedbackReceived ? `Received on ${formatDate(row.data.feedbackReceivedOn)}` : 'Not received'}</dd></div></dl>
         <p className="pre-wrap">{row.data.productNotes}</p><p className="pre-wrap">{row.data.notes}</p>
         {row.data.paymentNote && <p className="pre-wrap">{row.data.paymentNote}</p>}
@@ -265,6 +235,7 @@ function RecordHistory({ id }: { id: string }) {
 }
 
 export function RecordDetail() {
+  const me = useOutletContext<Me>();
   const { id } = useParams();
   const location = useLocation();
   const { data, error, loading } = useResource<RecordWorkspace>(`/records/${id}/detail`);
@@ -313,10 +284,8 @@ export function RecordDetail() {
         </section>}
         <section className="panel timeline-panel"><div className="section-heading"><div><h2>Your sales journey</h2><p>Green stages are reached. Every step keeps its date.</p></div><StageBadge record={record} /></div>
           <Timeline record={record} />{!record.discarded && <div className="timeline-actions"><button className="text-button muted" disabled={recordBusy} onClick={() => setAction('correction')}><History size={15} />Correct a stage or date</button>
-            {next ? <button className="button primary" onClick={() => setAction('stage')} disabled={recordBusy || (next === 'dispatched' && !record.stockUpdated) || (next === 'closed' && !record.paymentReceived)}>{labels[next]}<ArrowRight size={17} /></button> : <span className="completed-label"><Check size={17} />Delivered, paid, and closed</span>}</div>}
-          {!record.discarded && next === 'dispatched' && !record.stockUpdated && <p className="closing-note">
-            Use Stock updated in the stock box before dispatching this order.
-          </p>}
+            {next ? <button className="button primary" onClick={() => setAction('stage')} disabled={recordBusy || (next === 'closed' && !record.paymentReceived)}>{labels[next]}<ArrowRight size={17} /></button> : <span className="completed-label"><Check size={17} />Delivered, paid, and closed</span>}</div>}
+          {!record.discarded && next === 'dispatched' && record.inventoryTracked && !!record.parts?.length && <p className="closing-note">Dispatch deducts these quantities from stock.</p>}
           {!record.discarded && next === 'closed' && !record.paymentReceived && <p className="closing-note">
             Use Received in the payment box to close this delivered sale.
           </p>}
@@ -332,6 +301,7 @@ export function RecordDetail() {
             </div><p className="pre-wrap">{record.productNotes || 'No product notes yet.'}</p></div>
             <div className="note-block"><h3>General notes</h3><p className="pre-wrap">{record.notes || 'No general notes yet.'}</p></div>
           </section>
+          {me.manufacturingEnabled && <SalesPartsPanel row={row} busy={recordBusy} />}
           <section className="panel details-panel"><div className="section-heading compact"><h2><Clock3 size={19} /> Follow-ups</h2>{!record.discarded && <button className="text-button" disabled={recordBusy} onClick={() => setAction('followup')}><Plus size={15} />Log follow-up</button>}</div>
             <div className="followup-next"><CalendarDays size={18} /><div><small>NEXT FOLLOW-UP</small><strong>{formatDate(record.nextFollowUpOn)}</strong></div></div>
             {!record.followUps.length && <p className="muted">{record.discarded ? 'No follow-up notes were recorded.' : 'Record a conversation or set the next reminder. The sales stage stays unchanged.'}</p>}
@@ -340,7 +310,6 @@ export function RecordDetail() {
           <aside><PaymentPanel key={row.id} row={row} actions={recordActions} note={paymentDraft?.entityId === row.entityId ? paymentDraft.note : record.paymentNote}
             onNoteChange={note => setPaymentDraft({ entityId: row.entityId, note })}
             done={warning => { setPaymentDraft(null); setNotice(warning); }} />
-            <StockPanel key={`stock-${row.id}`} row={row} actions={recordActions} done={setNotice} />
             <FeedbackPanel key={`feedback-${row.id}`} row={row} actions={recordActions} done={setNotice} />
             <div className="audit-note"><History size={17} /><span>Last updated {formatDate(row.createdAt)}<br />Creation and later changes are retained in history.</span></div></aside>
         </div>

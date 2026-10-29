@@ -8,13 +8,15 @@ from fastapi import APIRouter, Query, Request
 from google.cloud.firestore_v1.base_query import FieldFilter
 from pydantic import Field
 
-from .domain import Identifier, Model, Problem, Text, now, today
+from .domain import Identifier, Model, PartQuantity, Problem, Text, now, today
 from .manufacturing_domain import Command
 from .storage import digest
 
 RecordView = Literal["active", "all", "ready", "in_progress", "completed", "cancelled"]
-RecordAction = Literal["assign", "complete", "reassign", "undo", "cancel"]
+RecordAction = Literal["assign", "complete", "reassign", "undo", "cancel", "quantity"]
 SUMMARY_FIELDS = [
+    "quantity",
+    "inventoryTracked",
     "id",
     "number",
     "productId",
@@ -43,6 +45,12 @@ class NewManufacturingRecord(Model):
     productId: Identifier
     sourceToken: str = Field(pattern=r"^[a-f0-9]{64}$")
     notes: Text = ""
+    quantity: PartQuantity
+
+
+class QuantityCorrection(Model):
+    quantity: PartQuantity
+    reason: Text = Field(min_length=1)
 
 
 class WorkAssignment(Model):
@@ -247,6 +255,8 @@ class ManufacturingRecords:
                 **source,
                 "number": f"MFG-{number:05d}",
                 "notes": data.notes,
+                "quantity": data.quantity,
+                "inventoryTracked": True,
                 "currentIndex": 0,
                 "status": "ready",
                 "startedOn": None,
@@ -277,9 +287,15 @@ class ManufacturingRecords:
             record = deepcopy(old)
             if record["status"] == "cancelled":
                 raise Problem("Cancelled manufacturing records are read-only.", 409, "record_cancelled")
-            if record["status"] == "completed" and action != "undo":
+            if record["status"] == "completed" and action not in ("undo", "quantity"):
                 raise Problem("This manufacturing record is already completed.", 409, "record_completed")
-            if action == "cancel":
+            if action == "quantity":
+                data = QuantityCorrection.model_validate(body.data)
+                event.update(
+                    reason=data.reason, previousQuantity=record.get("quantity"), quantity=data.quantity,
+                )
+                record["quantity"] = data.quantity
+            elif action == "cancel":
                 data = WorkCancellation.model_validate(body.data)
                 record["status"] = "cancelled"
                 record["cancelledAt"], record["cancelReason"] = now(), data.reason
@@ -384,6 +400,11 @@ class ManufacturingRecords:
         if len(json.dumps(saved).encode()) > 900_000:
             raise Problem("This manufacturing record is too large to save safely.")
         event.update({"id": body.writeId, "sequence": saved["version"]})
+        from .inventory import Inventory
+
+        writes.extend(Inventory(self.repo).manufacturing(
+            transaction, saved, body, actor, old is None, event.get("reason", ""),
+        ))
         writes.extend(
             [
                 (self.repo.ref("manufacturingRecords", body.id), saved),

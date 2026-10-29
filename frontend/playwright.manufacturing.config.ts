@@ -6,7 +6,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const python = process.platform === 'win32' ? '.venv\\Scripts\\python.exe' : '.venv/bin/python';
 const workspace = `producttrackr-browser-${process.pid}-${Date.now()}`;
 export default defineConfig({
-  testDir: './tests', testMatch: /(?:producttrackr|manufacturing|manufacturing-records|manufacturing-recovery|manufacturing-cleanup|manufacturing-spreadsheet)\.spec\.ts/, workers: 1, timeout: 120_000,
+  testDir: './tests', testMatch: /(?:producttrackr|manufacturing|manufacturing-records|manufacturing-recovery|manufacturing-cleanup|manufacturing-spreadsheet|machine-sales|inventory)\.spec\.ts/, workers: 1, timeout: 120_000,
   outputDir: path.join(root, '.local-data', 'browser-manufacturing-results', workspace),
   use: { baseURL: 'http://127.0.0.1:8014', viewport: { width: 1440, height: 1000 }, trace: 'retain-on-failure' },
   webServer: {

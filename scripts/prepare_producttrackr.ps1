@@ -76,7 +76,7 @@ function Index-Key($Index) {
     return "$Group/$($Index.queryScope)/$($Fields -join ',')"
 }
 
-$Groups = @('products', 'contacts', 'manufacturingRecords', 'manufacturingRecordEvents')
+$Groups = @('products', 'contacts', 'manufacturingRecords', 'manufacturingRecordEvents', 'entities', 'stockMovements')
 $Definitions = Get-Content -Raw (Join-Path $Root 'firestore.indexes.json') | ConvertFrom-Json
 $Indexes = @($Definitions.indexes | Where-Object { $_.collectionGroup -in $Groups })
 $Current = @(Invoke-Cloud firestore indexes composite list "--database=$($Config.database)" --format=json |

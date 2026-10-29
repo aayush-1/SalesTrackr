@@ -109,38 +109,24 @@ def test_firestore_generation_is_required_for_prepare_and_save(client, repo):
     assert client.get("/api/me").json()["generation"] == repo.generation
 
 
-def test_firestore_stock_update_on_legacy_record_preserves_history_and_indexed_queues(client, repo):
+def test_legacy_record_has_no_stock_command_or_automatic_rewrite(client, repo):
     owner = account(repo)
-    data = RecordData(
-        accountId=owner["entityId"],
-        workflowVersion=3,
-        stageDates={stage: today() for stage in STAGES[:4]},
-    ).model_dump(mode="json", exclude={"stockUpdated", "stockUpdatedOn"})
-    original = raw("record", data=data)
-    repo.commit(original)
+    data = RecordData(accountId=owner["entityId"], workflowVersion=3,
+                      stageDates={stage: today() for stage in STAGES[:4]}).model_dump(mode="json")
+    data.update(stockUpdated=True, stockUpdatedOn=today().isoformat())
+    original = repo.commit(raw("record", data=data))["revision"]
     before = repo.workspace.get().to_dict()
-    assert client.get(f"/api/records/{original['entityId']}/detail").json()["revision"] == original
+    response, _ = write(client, repo, "record", {"updated": True}, current=original,
+                        route=f"/api/records/{original['entityId']}/stock")
+    assert response.status_code == 405
+    assert repo.workspace.get().to_dict() == before
     assert repo.current(original["entityId"]) == original
-    response, body = write(
-        client,
-        repo,
-        "record",
-        {"updated": True},
-        current=original,
-        route=f"/api/records/{original['entityId']}/stock",
-    )
-    assert response.status_code == 200, response.text
-    saved = response.json()["revision"]
-    assert saved["data"] == {**data, "stockUpdated": True, "stockUpdatedOn": today().isoformat()}
-    assert repo.workspace.get().to_dict()["dashboard"] == {**before["dashboard"], "stock-pending": 0}
-    retry = client.post(f"/api/records/{original['entityId']}/stock", json=body, headers=headers(repo))
-    assert retry.status_code == 200 and retry.json()["revision"] == saved
-    assert len(repo.read_history(original["entityId"])) == 2
-    assert original in repo.read_history(original["entityId"])
+    assert len(repo.read_history(original["entityId"])) == 1
+    assert "stock-pending" not in before["dashboard"]
     assert repo.query_records("dispatched", "", None, None, None, None, None, "all", 0, 50)["total"] == 1
 
 
-def test_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo, settings):
+def test_retired_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo, settings):
     owner = account(repo)
     for stage_index, updated, discarded in (
         (2, False, False), (3, False, False), (5, False, False),
@@ -151,13 +137,9 @@ def test_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo
             stageDates={stage: today() for stage in STAGES[:stage_index + 1]},
             paymentReceived=stage_index == 5,
             paymentReceivedOn=today() if stage_index == 5 else None,
-            stockUpdated=updated, stockUpdatedOn=today() if updated else None,
             discarded=discarded, discardNote="Synthetic discarded record" if discarded else "",
             discardedOn=today() if discarded else None,
         ).model_dump(mode="json")
-        if not updated:
-            data.pop("stockUpdated")
-            data.pop("stockUpdatedOn")
         repo.commit(raw("record", data=data))
     other = FirestoreRepository(settings)
     before, control = repo.snapshot()
@@ -166,15 +148,13 @@ def test_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo
         if old["kind"] != "record":
             continue
         old["viewVersion"] = 1
-        old["queryData"].pop("stockUpdated", None)
-        old["views"] = [view for view in old["views"] if view != "stock-pending"]
-        old["buckets"] = [key for key in old["buckets"] if not key.startswith("record|stock-pending|")]
+        old["queryData"]["stockUpdated"] = False
+        old["views"].append("stock-pending")
+        old["buckets"].append("record|stock-pending|*|*")
         item.reference.set(old)
     repo.workspace.update({
         "viewIndex": {"dataset": control["activeDataset"], "version": 1},
-        "dashboard": {
-            view: count for view, count in control["dashboard"].items() if view != "stock-pending"
-        },
+        "dashboard": {**control["dashboard"], "stock-pending": 6},
     })
     original = repo._revision
     calls = 0
@@ -194,9 +174,9 @@ def test_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo
     assert repo.snapshot()[0] == before
     assert repo.control["sequence"] == control["sequence"]
     assert repo.generation == control["generation"]
-    assert repo.control["dashboard"]["stock-pending"] == 3
-    result = repo.query_records("stock-pending", "", None, None, None, None, None, "all", 0, 50)
-    assert result["total"] == 3
+    assert "stock-pending" not in repo.control["dashboard"]
+    result = repo.query_records("all", "", None, None, None, None, None, "all", 0, 50)
+    assert result["total"] == 6
     assert any("dispatched" not in row["data"]["stageDates"] for row in result["items"])
     assert {row["data"]["stageDates"].get("closed") is not None for row in result["items"]} == {True, False}
     after = repo.workspace.get().to_dict()
@@ -205,7 +185,7 @@ def test_stock_view_backfill_resumes_concurrently_without_rewriting_history(repo
     assert repo.workspace.get().to_dict() == after
 
 
-def test_stock_view_backfill_is_fenced_against_a_dataset_switch(repo):
+def test_retired_stock_view_backfill_is_fenced_against_a_dataset_switch(repo):
     owner = account(repo)
     data = RecordData(accountId=owner["entityId"], stageDates={"new_lead": today()}).model_dump(mode="json")
     saved = repo.commit(raw("record", data=data))["revision"]
@@ -222,7 +202,7 @@ def test_stock_view_backfill_is_fenced_against_a_dataset_switch(repo):
     assert repo.workspace.get().to_dict()["viewIndex"] is None
 
 
-def test_stock_indexes_repair_an_old_revision_finishing_a_save_after_upgrade(repo):
+def test_indexes_repair_an_old_revision_finishing_a_save_after_upgrade(repo):
     owner = account(repo)
     data = RecordData(
         accountId=owner["entityId"], workflowVersion=3,
@@ -233,16 +213,15 @@ def test_stock_indexes_repair_an_old_revision_finishing_a_save_after_upgrade(rep
     ref = repo.namespace.collection("entities").document(saved["entityId"])
     old = ref.get().to_dict()
     old.pop("viewVersion")
-    old["queryData"].pop("stockUpdated")
-    old["views"].remove("stock-pending")
-    old["buckets"] = [key for key in old["buckets"] if not key.startswith("record|stock-pending|")]
+    old["views"].remove("orders")
+    old["buckets"] = [key for key in old["buckets"] if not key.startswith("record|orders|")]
     ref.set(old)
     repo.workspace.update({"sequence": control["sequence"] + 1})
-    assert repo.workspace.get().to_dict()["dashboard"]["stock-pending"] == 1
-    assert repo.query_records("stock-pending", "", None, None, None, None, None, "all", 0, 50)["total"] == 0
+    assert repo.workspace.get().to_dict()["dashboard"]["orders"] == 1
+    assert repo.query_records("orders", "", None, None, None, None, None, "all", 0, 50)["total"] == 0
     repo.sync()
-    assert repo.query_records("stock-pending", "", None, None, None, None, None, "all", 0, 50)["total"] == 1
-    assert repo.control["dashboard"]["stock-pending"] == 1
+    assert repo.query_records("orders", "", None, None, None, None, None, "all", 0, 50)["total"] == 1
+    assert repo.control["dashboard"]["orders"] == 1
     assert repo.snapshot()[0] == before
 
 
@@ -417,6 +396,7 @@ def test_backup_contains_readable_entity_json_and_exact_full_history():
     with zipfile.ZipFile(io.BytesIO(data)) as source:
         assert set(source.namelist()) == {
             "manifest.json", "accounts.json", "contacts.json", "sales-records.json",
+            "models.json", "sent-parts.json",
         }
         assert b'\n  {' in source.read("accounts.json")
         assert json.loads(source.read("accounts.json"))[0]["current"] == owner
@@ -995,7 +975,9 @@ def test_drive_to_firestore_migration_preserves_every_source_file_and_history(re
     with patch("scripts.firestore_admin.time.sleep") as sleep:
         result = migrate_drive(source, repo, path)
     assert 299 < sleep.call_args.args[0] <= 300
-    assert result["counts"] == {"account": 1, "contact": 0, "record": 0, "revisions": 2}
+    assert result["counts"] == {
+        "account": 1, "contact": 0, "record": 0, "model": 0, "sent_part": 0, "revisions": 2,
+    }
     assert result["sourceFilesUnchanged"] and result["sourceBackupsUnchanged"]
     assert {raw["id"]: raw for raw in repo.snapshot()[0]} == {raw["id"]: raw for raw in [owner, edited]}
     assert repo.current(owner["entityId"]) == edited
@@ -1147,7 +1129,7 @@ def test_record_cleanup_lists_only_eligible_records_and_physically_reclaims_all_
         key: value for key, value in original_hashes.items() if key not in {item["id"] for item in removed}
     }
     assert repo.generation == generation and repo.control["entityCounts"] == {
-        "account": 1, "contact": 1, "record": 2,
+        "account": 1, "contact": 1, "record": 2, "model": 0, "sent_part": 0,
     }
     for record in (owner, contact, awaiting, active):
         assert repo.current(record["entityId"]) == record

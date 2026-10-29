@@ -5,7 +5,10 @@ export interface ManufacturingMeta {
 export interface ManufacturingEntity {
   id: string; version: number; name: string; createdAt: string; updatedAt: string; updatedBy: string;
 }
-export interface Product extends ManufacturingEntity { partNumber: string; notes: string; stepIds: string[] }
+export interface Product extends ManufacturingEntity {
+  partNumber: string; notes: string; stepIds: string[]; modelIds?: string[];
+  stockQuantity?: number | null; minimumStockQuantity?: number | null;
+}
 export interface Operation extends ManufacturingEntity { description: string }
 export interface Supplier extends ManufacturingEntity {
   type: 'company' | 'individual'; relationship: 'external' | 'internal';
@@ -31,7 +34,7 @@ export interface ManufacturingDetail extends ManufacturingMeta {
 
 export type ManufacturingRecordStatus = 'ready' | 'in_progress' | 'completed' | 'cancelled';
 export type ManufacturingRecordView = ManufacturingRecordStatus | 'active' | 'all';
-export type ManufacturingRecordAction = 'assign' | 'complete' | 'reassign' | 'undo' | 'cancel';
+export type ManufacturingRecordAction = 'assign' | 'complete' | 'reassign' | 'undo' | 'cancel' | 'quantity';
 export interface WorkAssignment {
   supplierId: string; supplierName: string; type: Supplier['type']; relationship: Supplier['relationship'];
   email: string; phone: string; contact: Pick<CompanyContact, 'id' | 'name' | 'designation' | 'email' | 'phone'> | null;
@@ -50,6 +53,7 @@ export interface ManufacturingRecordSummary {
   currentOperationId: string | null; currentOperationName: string | null;
   currentSupplierId: string | null; currentSupplierName: string | null; currentContactName: string | null;
   startedOn: string | null; completedOn: string | null; createdAt: string; updatedAt: string;
+  quantity?: number | null; inventoryTracked?: boolean;
 }
 export interface ManufacturingRecord extends ManufacturingRecordSummary {
   operations: ManufacturingWorkStep[]; currentIndex: number | null; updatedBy: string;
@@ -75,6 +79,7 @@ export interface ManufacturingRecordEvent {
   actor: string; recordedAt: string; occurredOn?: string; operationName?: string;
   note?: string; reason?: string; assignment?: WorkAssignment; previousAssignment?: WorkAssignment;
   previousCompletedOn?: string;
+  quantity?: number; previousQuantity?: number | null;
 }
 export interface ManufacturingRecordHistory extends ManufacturingMeta { items: ManufacturingRecordEvent[]; total: number }
 

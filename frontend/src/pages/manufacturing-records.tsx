@@ -16,7 +16,7 @@ const labels: Record<ManufacturingRecordView | 'pending', string> = {
 };
 const actionLabels: Record<ManufacturingRecordAction, string> = {
   assign: 'Assign & start', complete: 'Complete operation', reassign: 'Reassign supplier',
-  undo: 'Undo last completion', cancel: 'Cancel record',
+  undo: 'Undo last completion', cancel: 'Cancel record', quantity: 'Correct quantity',
 };
 const views: ManufacturingRecordView[] = ['active', 'all', 'ready', 'in_progress', 'completed', 'cancelled'];
 const recordLink = (id: string) => `/manufacturing/records/${id}`;
@@ -37,7 +37,7 @@ function RecordTable({ records }: { records: ManufacturingRecordSummary[] }) {
     <th>Record / product</th><th>Current operation</th><th>Responsible supplier</th><th>Progress</th><th>Status</th><th>Updated</th>
   </tr></thead><tbody>{records.map(record => <tr key={record.id}>
     <td><Link className="record-title" to={recordLink(record.id)}>{record.number}</Link>
-      <Link className="cell-sub" to={productLink(record.productId)}>{record.productName}</Link><span className="cell-sub">{record.productPartNumber || 'No part number'}</span></td>
+      <Link className="cell-sub" to={productLink(record.productId)}>{record.productName}</Link><span className="cell-sub">{record.productPartNumber || 'No part number'} / Quantity: {record.quantity ?? 'Not recorded'}</span></td>
     <td>{record.currentOperationName || 'All operations completed'}</td>
     <td>{record.currentSupplierId ? <><Link to={`/manufacturing/suppliers/${record.currentSupplierId}`}>{record.currentSupplierName}</Link>
       {record.currentContactName && <span className="cell-sub">{record.currentContactName}</span>}</>
@@ -111,6 +111,7 @@ export function NewManufacturingRecordPage() {
   const [params] = useSearchParams();
   const [productId, setProduct] = useState(params.get('productId') || '');
   const [notes, setNotes] = useState('');
+  const [quantity, setQuantity] = useState(params.get('quantity') || '');
   const products = useManufacturingDirectory('products');
   const preview = useManufacturingResource<ManufacturingRecordPreview>(productId ? `/records/preview/${productId}` : null);
   const save = useManufacturingSave({ refreshOnSave: false });
@@ -122,7 +123,7 @@ export function NewManufacturingRecordPage() {
     event.preventDefault(); const form = event.currentTarget; form.dataset.dirty = 'true';
     if (!source && !save.unconfirmed) return;
     const result = save.unconfirmed ? await save.retry() : await save.save('/records', {
-      productId, sourceToken: source!.sourceToken, notes,
+      productId, sourceToken: source!.sourceToken, notes, quantity: Number(quantity),
     }, null);
     if (result) { markFormSaved(form); refresh(); navigate(recordLink(result.id)); }
   };
@@ -133,6 +134,7 @@ export function NewManufacturingRecordPage() {
       {(save.error || products.error) && <Alert>{save.error || products.error}</Alert>}
       <div className="form-grid"><Field label="Product process" wide><select required disabled={products.loading || locked} value={productId} onChange={e => setProduct(e.target.value)}>
         <option value="">Select a product</option>{products.items.map(p => <option key={p.id} value={p.id}>{p.name}{(p as Product).partNumber ? ` · ${(p as Product).partNumber}` : ''}</option>)}</select></Field>
+        <Field label="Quantity *"><input type="number" min={1} max={10 ** 12} step={1} required value={quantity} disabled={locked} onChange={event => setQuantity(event.target.value)} /></Field>
         <Field label="Job notes" wide><textarea rows={3} maxLength={10000} placeholder="Drawing reference, job instructions or internal notes..." value={notes} disabled={locked} onChange={e => setNotes(e.target.value)} /></Field></div>
       {preview.loading && productId ? <Loading /> : preview.error ? <Alert>{preview.error} <Link to={productLink(productId)}>Open Product process</Link></Alert> : source ? <>
         <div className="bt-panel-heading"><div><h2>Copied operation route</h2><p className="muted">{source.process.productName} · Part number: {source.process.productPartNumber || 'Not added'}</p></div>
@@ -172,16 +174,17 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
   const [supplierId, setSupplier] = useState(detail.eligibleSuppliers.some(p => p.supplier.id === existingSupplier) ? existingSupplier : '');
   const [contactId, setContact] = useState(supplierId && action === 'reassign' ? current?.assignment?.contact?.id || '' : '');
   const [occurredOn, setDate] = useState(detail.today), [note, setNote] = useState(''), [reason, setReason] = useState('');
+  const [quantity, setQuantity] = useState(record.quantity?.toString() || '');
   const supplier = detail.eligibleSuppliers.find(p => p.supplier.id === supplierId)?.supplier;
   const contacts = useManufacturingDirectory(isAssignment && supplier?.type === 'company' ? 'contacts' : null, `&supplierId=${supplierId}`);
   const save = useManufacturingSave({ refreshOnSave: false });
   const locked = save.busy || save.unconfirmed;
-  const needsReason = action === 'reassign' || action === 'undo' || action === 'cancel';
+  const needsReason = action === 'reassign' || action === 'undo' || action === 'cancel' || action === 'quantity';
   const previousCompletion = record.currentIndex && record.currentIndex > 0 ? record.operations[record.currentIndex - 1].completedOn : null;
   const minimum = action === 'assign' ? previousCompletion : current?.assignedOn;
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); const form = event.currentTarget; form.dataset.dirty = 'true';
-    const data = action === 'cancel' ? { reason } : action === 'undo' ? { reason, stepId: undoStep!.id }
+    const data = action === 'quantity' ? { reason, quantity: Number(quantity) } : action === 'cancel' ? { reason } : action === 'undo' ? { reason, stepId: undoStep!.id }
       : { stepId: current!.id, occurredOn, note, ...(isAssignment ? { supplierId, contactId: contactId || null } : {}), ...(needsReason ? { reason } : {}) };
     const result = save.unconfirmed ? await save.retry() : await save.save(`/records/${record.id}/${action}`, data, record.version, record.id);
     if (result) { markFormSaved(form); onSaved(); }
@@ -202,6 +205,7 @@ function RecordActionForm({ detail, action, undoStep, onClose, onSaved }: {
         {supplier?.type === 'company' && <Field label="Company contact (optional)" wide><select value={contactId} disabled={locked || contacts.loading || !!contacts.error} onChange={e => setContact(e.target.value)}>
           <option value="">No contact selected</option>{contacts.items.map(contact => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select></Field>}
       </>}
+        {action === 'quantity' && <Field label="Quantity *"><input type="number" required min={1} max={10 ** 12} step={1} value={quantity} disabled={locked} onChange={event => setQuantity(event.target.value)} /></Field>}
         {(isAssignment || action === 'complete') && <>
           <Field label={action === 'complete' ? 'Completed on' : action === 'reassign' ? 'Reassigned on' : 'Started on'} wide hint="Actual work date, not the time this change is recorded.">
             <input type="date" required value={occurredOn} max={detail.today} min={minimum || undefined} disabled={locked} onChange={event => setDate(event.target.value)} />
@@ -223,6 +227,7 @@ function HistoryEntry({ event }: { event: ManufacturingRecordEvent }) {
     {event.assignment && <p>Supplier: {event.assignment.supplierName}{event.assignment.contact ? ` · ${event.assignment.contact.name}` : ''}</p>}
     {event.occurredOn && <p>Actual work date: {workDate(event.occurredOn)}</p>}
     {event.previousCompletedOn && <p>Corrected completion date: {workDate(event.previousCompletedOn)}</p>}
+    {event.quantity !== undefined && <p>Quantity: {event.previousQuantity ?? 'Not recorded'} → {event.quantity}</p>}
     {(event.reason || event.note) && <p className="bt-text">{event.reason || event.note}</p>}
     {event.reason && event.note && <p className="bt-text">{event.note}</p>}
     <small>Recorded {new Date(event.recordedAt).toLocaleString()} · {event.actor} · #{event.sequence}</small>
@@ -257,7 +262,7 @@ function RecordDetailContent({ detail, error, refreshing }: { detail: Manufactur
       action={<div className="bt-record-actions"><Link className="button" to={productLink(record.productId)}>Product process<ArrowRight size={15} /></Link>
         <button className="icon-button" aria-label="Refresh manufacturing record" disabled={refreshing} onClick={refresh}><RefreshCw size={17} /></button></div>} />
     {error && <Alert>{error}</Alert>}
-    <section className="panel bt-record-summary"><div><Status status={record.status} /><p>{record.productName} · Part number: {record.productPartNumber || 'Not added'}</p></div>
+    <section className="panel bt-record-summary"><div><Status status={record.status} /><p>{record.productName} · Part number: {record.productPartNumber || 'Not added'}</p><p>Quantity: <strong>{record.quantity ?? 'Not recorded'}</strong></p></div>
       <Progress record={record} /><div className="bt-record-dates"><span>First started <strong>{workDate(record.startedOn)}</strong></span>
         {record.completedOn && <span>Completed <strong>{workDate(record.completedOn)}</strong></span>}</div></section>
     {record.notes && <section className="panel details-panel bt-record-notes"><h2>Job notes</h2><p className="bt-text">{record.notes}</p></section>}
@@ -292,6 +297,7 @@ function RecordDetailContent({ detail, error, refreshing }: { detail: Manufactur
           <p className="bt-record-explanation">Responsibility tracks workflow, not verified physical location or supplier acknowledgement. No notifications are sent.</p>
         </section>
         {(record.active || record.status === 'completed') && <section className="panel bt-record-corrections"><h3>Corrections & exceptions</h3>
+          <button className="button full" disabled={refreshing} onClick={() => open('quantity')}>Correct quantity</button>
           {record.completedCount > 0 && <><button className="button full" disabled={refreshing || !undoStep} onClick={() => open('undo')}>Undo last completion</button>
             {!undoStep && <p className="muted">The next operation has started, so earlier completions are locked.</p>}</>}
           {record.active && <button className="button danger full" disabled={refreshing} onClick={() => open('cancel')}>Cancel record</button>}

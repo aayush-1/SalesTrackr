@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Link, Navigate, NavLink, Outlet, Route, Routes, useParams } from 'react-router-dom';
 import {
   ArchiveX, Building2, CheckCheck, CircleDollarSign, ClipboardList, LayoutDashboard,
-  Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon, Truck,
+  History, Layers, Leaf, Menu, MessageSquare, MessageSquareText, PackageCheck, PanelLeftClose, Plus, RefreshCw, Settings as SettingsIcon, Truck,
 } from 'lucide-react';
 import { RefreshContext, WorkspaceContext, useResource } from './api';
 import { Alert, Loading } from './components';
@@ -21,6 +21,9 @@ import { BuildDetail, BuildDirectory } from './pages/producttrackr';
 import { ManufacturingRecordDetailPage, ManufacturingRecordsPage, NewManufacturingRecordPage } from './pages/manufacturing-records';
 import { WorkspaceSwitcher } from './workspace-switcher';
 import { SupplierWorkPage } from './pages/supplier-work';
+import { MachinePartsPage, ModelsPage, PartsHistoryPage } from './pages/sales-parts';
+import { LowStockPage, OrderShortagePage } from './pages/inventory';
+import { ModelPartsPage } from './pages/model-parts';
 import './styles.css';
 
 function Shell() {
@@ -40,12 +43,17 @@ function Workspace({ onRefresh }: { onRefresh: () => void }) {
   const nav = [
     ['/', 'Overview', LayoutDashboard], ['/records', 'All sales records', ClipboardList],
     ['/accounts', 'Accounts', Building2],
+    ...(identity.data?.manufacturingEnabled ? [
+      ['/models', 'Models', Layers], ['/parts-history', 'Sales History', History],
+      ['/machine-parts', 'Potential Spares machine wise', PackageCheck],
+      ['/order-shortages', 'Order in hand shortage', PackageCheck],
+    ] as const : []),
   ] as const;
   const pipeline = [
     ['leads', Leaf], ['followups', MessageSquare], ['orders', PackageCheck],
     ['dispatched', Truck], ['delivered', CheckCheck],
     ['pending', CircleDollarSign], ['paid', CircleDollarSign], ['closed', CheckCheck],
-    ['feedback-pending', MessageSquareText], ['stock-pending', PackageCheck], ['discarded', ArchiveX],
+    ['feedback-pending', MessageSquareText], ['discarded', ArchiveX],
   ] as const;
   return <div className={`app ${open ? 'navigation-open' : ''}`}>
     <aside className={`sidebar ${open ? 'open' : ''}`}>
@@ -100,6 +108,9 @@ createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><
     <Route path="partners/:id" element={<LegacySupplierRoute />} />
     <Route path="records" element={<ManufacturingRecordsPage />} />
     <Route path="supplier-work" element={<SupplierWorkPage />} />
+    <Route path="low-stock" element={<LowStockPage />} />
+    <Route path="order-shortages" element={<OrderShortagePage />} />
+    <Route path="model-parts" element={<ModelPartsPage />} />
     <Route path="records/new" element={<NewManufacturingRecordPage />} />
     <Route path="records/:id" element={<ManufacturingRecordDetailPage />} />
     <Route path="blueprint" element={<Navigate replace to="/manufacturing/operations" />} />
@@ -111,6 +122,10 @@ createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><
     <Route path="accounts" element={<Accounts />} />
     <Route path="accounts/new" element={<AccountForm />} />
     <Route path="accounts/:id" element={<AccountDetail />} />
+    <Route path="models" element={<ModelsPage />} />
+    <Route path="parts-history" element={<PartsHistoryPage />} />
+    <Route path="machine-parts" element={<MachinePartsPage />} />
+    <Route path="order-shortages" element={<OrderShortagePage />} />
     <Route path="records" element={<Records />} />
     <Route path="view/:view" element={<Records />} />
     <Route path="records/new" element={<NewRecordPage />} />

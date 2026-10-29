@@ -258,7 +258,9 @@ def test_failed_drive_provisioning_keeps_the_saved_product_and_can_retry(configu
     client, _ = configured_app
     store, rows, _ = drive
     store.products_folder.side_effect = Problem("Drive is unavailable", 503, "drive_network")
-    response, body = command(client, "/products", {"name": "Saved despite folder outage"})
+    response, body = command(client, "/products", {
+        "name": "Saved despite folder outage", "stockQuantity": 0, "minimumStockQuantity": 0,
+    })
     assert response.status_code == 200 and response.json()["id"] == body["id"]
     assert response.json()["folderWarning"] == "Drive is unavailable"
     assert client.get(f"/api/manufacturing/products/{body['id']}").status_code == 200

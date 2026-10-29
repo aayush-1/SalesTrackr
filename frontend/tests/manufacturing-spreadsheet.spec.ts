@@ -4,6 +4,7 @@ import type { APIRequestContext, Page } from '@playwright/test';
 const path = '/api/manufacturing/settings/spreadsheet';
 const identifier = () => crypto.randomUUID().replaceAll('-', '');
 async function create(request: APIRequestContext, kind: string, data: object) {
+  if (kind === 'products') data = { stockQuantity: 1000, minimumStockQuantity: 0, ...data };
   const meta = await (await request.get('/api/manufacturing/meta')).json();
   const id = identifier();
   const response = await request.post(`/api/manufacturing/${kind}`, {

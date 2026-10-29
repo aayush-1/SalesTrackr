@@ -22,7 +22,7 @@ from .timing import timed_phase
 
 CHUNK_SIZE = 512 * 1024
 MAX_PAYLOAD = 256 * 1024 * 1024
-VIEW_VERSION = 2
+VIEW_VERSION = 3
 
 
 def filtered(query, field, operator, value):
@@ -50,7 +50,7 @@ def projection(revisions, heads=None):
         "conflicted": len(heads) != 1,
         "viewVersion": VIEW_VERSION,
     }
-    if row["kind"] == "account":
+    if row["kind"] in ("account", "model"):
         names = {r["id"]: r["data"]["name"] for r in current}
         row.update(
             headNames=names,
@@ -62,6 +62,13 @@ def projection(revisions, heads=None):
                 name=data["name"], address=data.get("address", ""),
                 nameSort=data["name"].casefold(), nameSearchChars=sorted(set(data["name"].casefold())),
             )
+    if len(current) == 1 and row["kind"] == "sent_part":
+        data = current[0]["data"]
+        row.update(
+            accountId=data["accountId"], machineId=data.get("machineId") or "",
+            productId=data["productId"], sourceRecordId=data.get("sourceRecordId") or "",
+            sentOn=data["sentOn"], active=data["active"], source=data["source"],
+        )
     if len(current) == 1 and row["kind"] in ("record", "contact"):
         data = current[0]["data"]
         row.update(accountId=data["accountId"], contactId=data.get("contactId"))
@@ -80,7 +87,7 @@ def projection(revisions, heads=None):
                 ],
                 queryData={key: data[key] for key in (
                     "accountId", "productNotes", "stageDates", "workflowVersion", "discarded",
-                    "paymentReceived", "feedbackReceived", "stockUpdated", "nextFollowUpOn",
+                    "paymentReceived", "feedbackReceived", "nextFollowUpOn",
                 )},
             )
     return row
@@ -499,12 +506,22 @@ class FirestoreRepository:
         return self.commit(revision, generation=generation)
 
     def commit(self, revision, *, generation=None):
+        from .inventory import Inventory, check_budget
+        from .manufacturing_storage import ManufacturingRepository
+        from .sales_parts import prepare_delivery_write
+
         Revision.model_validate(revision)
         MODELS[revision["entityType"]].model_validate(revision["data"])
         generation = generation or self.generation
         namespace = self.namespace
+        revision, deliveries, reference_checks = prepare_delivery_write(self, revision)
+        inventory = (
+            Inventory(ManufacturingRepository(self.settings, client=self.client))
+            if revision["entityType"] == "record" and revision["data"].get("inventoryTracked") else None
+        )
         with timed_phase("payloadWriteMs"):
             payload = self._store_payload(revision)
+            delivery_payloads = {row["id"]: self._store_payload(row) for row in deliveries}
         entity_ref = namespace.collection("entities").document(revision["entityId"])
         version_ref = namespace.collection("revisions").document(revision["id"])
         new_row = projection([revision], heads={revision["id"]})
@@ -547,20 +564,45 @@ class FirestoreRepository:
                     if contact["accountId"] != data["accountId"]:
                         raise Problem("Choose a contact belonging to this account.")
             claims = {}
-            if kind == "account":
+            if kind in ("account", "model"):
                 keys = {account_name_key(data["name"])}
                 keys.update(account_name_key(name) for name in (old or {}).get("headNames", {}).values())
                 for key in keys:
                     name_id = hashlib.sha256(key.encode()).hexdigest()
-                    ref = namespace.collection("accountNames").document(name_id)
+                    ref = namespace.collection(
+                        "accountNames" if kind == "account" else "modelNames",
+                    ).document(name_id)
                     claim = ref.get(transaction=transaction).to_dict()
                     claims[key] = (ref, set((claim or {}).get("owners", [])))
                 other_owners = claims[account_name_key(data["name"])][1] - {revision["entityId"]}
-                if old is None and other_owners:
+                if other_owners and (old is None or kind == "model"):
                     raise Problem(
                         "An account with this company name already exists. "
-                        "Use the existing account instead of creating a duplicate.", 409, "account_exists",
+                        "Use the existing account instead of creating a duplicate."
+                        if kind == "account" else "A machine model with this name already exists.",
+                        409, "account_exists" if kind == "account" else "model_exists",
                     )
+            for ref, expected in reference_checks:
+                current = ref.get(transaction=transaction).to_dict()
+                if not current or any(current.get(key) != value for key, value in expected.items()):
+                    raise Problem(
+                        "A related account, machine, model or product changed. Refresh and retry.",
+                        409, "reference_changed",
+                    )
+            prepared_deliveries = []
+            for row in deliveries:
+                ref = namespace.collection("entities").document(row["entityId"])
+                previous = ref.get(transaction=transaction).to_dict()
+                version = namespace.collection("revisions").document(row["id"])
+                existing = version.get(transaction=transaction).to_dict()
+                if existing or (previous or {}).get("heads", []) != row["parents"]:
+                    raise Problem("Delivery history changed. Retry this save.", 409, "stale_edit")
+                if previous and previous["kind"] != "sent_part":
+                    raise Problem("The delivery identifier is already in use.", 409, "record_exists")
+                prepared_deliveries.append((row, ref, version, previous))
+            stock_control = inventory.control(transaction) if inventory else None
+            stock_writes = inventory.sale(transaction, revision) if inventory else []
+            check_budget(stock_writes, extra_writes=2 * len(prepared_deliveries) + 4)
             metadata = {
                 key: revision[key]
                 for key in ("id", "entityId", "entityType", "parents", "createdAt", "actor", "fingerprint")
@@ -568,6 +610,19 @@ class FirestoreRepository:
             metadata["hash"] = payload["hash"]
             transaction.create(version_ref, metadata)
             transaction.set(entity_ref, new_row)
+            for ref, value in stock_writes:
+                transaction.set(ref, value)
+            if stock_writes:
+                transaction.update(inventory.repo.workspace, {
+                    "version": stock_control["version"] + 1,
+                    "sequence": stock_control["sequence"] + 1,
+                })
+            for row, ref, version, previous in prepared_deliveries:
+                info = {key: row[key] for key in (
+                    "id", "entityId", "entityType", "parents", "createdAt", "actor", "fingerprint",
+                )}
+                transaction.create(version, {**info, "hash": delivery_payloads[row["id"]]["hash"]})
+                transaction.set(ref, projection([row], heads={row["id"]}))
             warning = None
             for key, (ref, owners) in claims.items():
                 owners.discard(revision["entityId"])
@@ -584,7 +639,10 @@ class FirestoreRepository:
                 "conflictCount": control["conflictCount"] - bool((old or {}).get("conflicted")),
             }
             if old is None:
-                updated["entityCounts"][kind] += 1
+                updated["entityCounts"][kind] = updated["entityCounts"].get(kind, 0) + 1
+            updated["entityCounts"]["sent_part"] = updated["entityCounts"].get("sent_part", 0) + sum(
+                previous is None for _, _, _, previous in prepared_deliveries
+            )
             for view in VIEWS:
                 updated["dashboard"][view] = updated["dashboard"].get(view, 0) + (
                     int(view in new_row.get("views", [])) - int(view in (old or {}).get("views", []))
@@ -773,6 +831,7 @@ class FirestoreRepository:
         namespace.create({"createdAt": now(), "state": "staging"})
         writes = []
         claims = {}
+        model_claims = {}
         payload_hashes = {raw["id"]: digest(raw) for raw in revisions}
         existing_payloads = self._payload_infos(payload_hashes.values())
         for raw in revisions:
@@ -786,10 +845,16 @@ class FirestoreRepository:
             writes.append((namespace.collection("entities").document(row["entityId"]), row))
             for name in row.get("headNames", {}).values():
                 key = hashlib.sha256(account_name_key(name).encode()).hexdigest()
-                claims.setdefault(key, set()).add(row["entityId"])
+                (claims if row["kind"] == "account" else model_claims).setdefault(key, set()).add(
+                    row["entityId"],
+                )
         writes.extend(
             (namespace.collection("accountNames").document(key), {"owners": sorted(owners)})
             for key, owners in claims.items()
+        )
+        writes.extend(
+            (namespace.collection("modelNames").document(key), {"owners": sorted(owners)})
+            for key, owners in model_claims.items()
         )
         for start in range(0, len(writes), 100):
             batch = self.client.batch()
@@ -803,10 +868,16 @@ class FirestoreRepository:
         actual_claims = {
             item.id: item.to_dict() for item in namespace.collection("accountNames").stream()
         }
+        actual_model_claims = {
+            item.id: item.to_dict() for item in namespace.collection("modelNames").stream()
+        }
         expected_claims = {key: {"owners": sorted(owners)} for key, owners in claims.items()}
         if (
             actual != expected or actual_rows != {row["entityId"]: row for row in rows}
             or actual_claims != expected_claims
+            or actual_model_claims != {
+                key: {"owners": sorted(owners)} for key, owners in model_claims.items()
+            }
         ):
             raise Problem(
                 "Staged restore verification failed; live data is unchanged.", 503, "restore_verify"

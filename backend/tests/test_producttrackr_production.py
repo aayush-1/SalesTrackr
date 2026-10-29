@@ -66,6 +66,7 @@ def test_production_shares_database_with_separate_workspace_and_runtime_credenti
     workspace.id = "producttrackr"
     workspace.get.return_value.to_dict.return_value = {
         "generation": "production-generation", "productSearchVersion": 1, "activeDataset": "legacy",
+        "productModelIndexDataset": "legacy",
         "namingVersion": 1,
     }
     with patch("backend.app.manufacturing_storage.firestore.Client", return_value=client) as factory:

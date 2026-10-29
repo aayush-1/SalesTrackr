@@ -9,6 +9,9 @@ import type {
 } from '../manufacturing-types';
 import { ConnectedManufacturingRecords } from './manufacturing-records';
 import { ProductFiles } from './product-files';
+import { useDirectory } from './sales-parts';
+import type { MachineModel, Revision } from '../types';
+import { StockEditor, StockHistory } from './inventory';
 
 export const directories = {
   products: { title: 'Products', singular: 'product', description: 'The components you build, and how they come together.', Icon: Layers },
@@ -35,12 +38,16 @@ function MasterEditor({ kind, entity, supplierId, onClose, onSaved, refreshOnSav
     key, entity ? value(entity, key) : key === 'type' ? 'company' : key === 'relationship' ? 'external' : key === 'supplierId' ? supplierId || '' : '',
   ])));
   const suppliers = useManufacturingDirectory(kind === 'contacts' ? 'suppliers' : null);
+  const models = useDirectory<Revision<MachineModel>>(kind === 'products' ? '/models' : null);
+  const [modelIds, setModelIds] = useState<string[]>((entity as Product | undefined)?.modelIds || []);
   const companies = suppliers.items.filter(p => (p as Supplier).type === 'company');
   const save = useManufacturingSave({ refreshOnSave });
   const form = useRef<HTMLFormElement | null>(null);
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); form.current = event.currentTarget; form.current.dataset.dirty = 'true';
-    const result = await save.save(entity ? `/${kind}/${entity.id}` : `/${kind}`, data, entity?.version ?? null, entity?.id, entity ? 'PUT' : 'POST');
+    const result = await save.save(entity ? `/${kind}/${entity.id}` : `/${kind}`, kind === 'products' ? { ...data, modelIds,
+      ...(!entity ? { stockQuantity: Number(data.stockQuantity), minimumStockQuantity: Number(data.minimumStockQuantity) } : {}),
+    } : data, entity?.version ?? null, entity?.id, entity ? 'PUT' : 'POST');
     if (result) { markFormSaved(form.current); onClose(); onSaved?.(result.id, data); }
   };
   const update = (key: string, next: string) => setData(old => ({ ...old, [key]: next, ...(key === 'type' && next === 'individual' ? { relationship: 'external' } : {}) }));
@@ -48,6 +55,7 @@ function MasterEditor({ kind, entity, supplierId, onClose, onSaved, refreshOnSav
     <TrackedForm onSubmit={submit}>
       {save.error && <Alert>{save.error}</Alert>}
       {suppliers.error && <Alert>{suppliers.error}</Alert>}
+      {models.error && <Alert>{models.error}</Alert>}
       <div className="form-grid">{fields[kind].map(([key, label, type]) => <Field key={key} label={label} wide={type === 'textarea'}
         hint={entity && (type === 'supplier' || type === 'type') ? 'This relationship stays fixed to protect existing contacts and assignments.' : undefined}>
         {type === 'textarea' ? <textarea name={key} value={data[key]} maxLength={10000} rows={3} disabled={save.busy || save.unconfirmed} onChange={e => update(key, e.target.value)} />
@@ -63,10 +71,19 @@ function MasterEditor({ kind, entity, supplierId, onClose, onSaved, refreshOnSav
           : <input name={key} type={type === 'email' ? 'email' : 'text'} required={key === 'name'} value={data[key]} maxLength={key === 'name' ? 200 : 10000}
             disabled={save.busy || save.unconfirmed} onChange={e => update(key, e.target.value)} />}
       </Field>)}</div>
+      {kind === 'products' && !entity && <div className="form-grid">
+        <Field label="Stock quantity *"><input type="number" min={0} max={10 ** 12} step={1} required value={data.stockQuantity ?? ''} disabled={save.busy || save.unconfirmed} onChange={event => update('stockQuantity', event.target.value)} /></Field>
+        <Field label="Minimum stock quantity *"><input type="number" min={0} max={10 ** 12} step={1} required value={data.minimumStockQuantity ?? ''} disabled={save.busy || save.unconfirmed} onChange={event => update('minimumStockQuantity', event.target.value)} /></Field>
+      </div>}
+      {kind === 'products' && <fieldset className="model-choices"><legend>Models</legend>
+        <label><input type="checkbox" checked={!modelIds.length} disabled={save.busy || save.unconfirmed} onChange={() => setModelIds([])} />Common / all models</label>
+        {models.items.map(model => <label key={model.entityId}><input type="checkbox" checked={modelIds.includes(model.entityId)} disabled={save.busy || save.unconfirmed}
+          onChange={event => setModelIds(ids => event.target.checked ? [...ids, model.entityId] : ids.filter(id => id !== model.entityId))} />{model.data.name}</label>)}
+      </fieldset>}
       {kind === 'contacts' && !suppliers.loading && !companies.length && <Alert tone="warning">Create a company in <Link to="/manufacturing/suppliers">Suppliers</Link> before adding its contacts. Independent people belong directly in Suppliers.</Alert>}
       <div className="form-actions"><button type="button" className="button" disabled={save.busy || save.unconfirmed} onClick={event => {
         if (event.currentTarget.form?.dataset.dirty !== 'true' || window.confirm('Discard unsaved changes?')) onClose();
-      }}>Cancel</button><SaveButton busy={save.busy} disabled={kind === 'contacts' && (!data.supplierId || suppliers.loading || !!suppliers.error)}>
+      }}>Cancel</button><SaveButton busy={save.busy} disabled={kind === 'contacts' && (!data.supplierId || suppliers.loading || !!suppliers.error) || kind === 'products' && (models.loading || !!models.error)}>
         {save.unconfirmed ? 'Retry same save' : entity ? 'Save changes' : `Create ${directories[kind].singular}`}
       </SaveButton></div>
     </TrackedForm>
@@ -81,6 +98,9 @@ export function BuildDirectory({ kind }: { kind: Directory }) {
   const navigate = useNavigate();
   const { refresh } = useManufacturing();
   const data = useManufacturingResource<ManufacturingPage>(`/${kind}?limit=50&offset=${offset}&search=${encodeURIComponent(search)}${company ? `&supplierId=${company}` : ''}`);
+  const models = useDirectory<Revision<MachineModel>>(
+    kind === 'products' && data.data?.items.some(entity => !!(entity as Product).modelIds?.length) ? '/models' : null,
+  );
   const suppliers = useManufacturingDirectory(kind === 'contacts' ? 'suppliers' : null);
   const names = new Map(suppliers.items.map(p => [p.id, p.name]));
   const config = directories[kind];
@@ -94,15 +114,17 @@ export function BuildDirectory({ kind }: { kind: Directory }) {
         </select>}
         <button className="icon-button" aria-label="Refresh directory" onClick={refresh}><RefreshCw size={17} /></button>
       </div>
-      {(data.error || suppliers.error) && <Alert>{data.error || suppliers.error}</Alert>}
+      {(data.error || suppliers.error || models.error) && <Alert>{data.error || suppliers.error || models.error}</Alert>}
       {data.loading ? <Loading /> : data.data && (!data.data.items.length ? <Empty title={`No ${config.title.toLowerCase()} ${search || company ? 'match' : 'yet'}`}
         text={search || company ? kind === 'products' ? 'Try another name or part number.' : 'Try another name or company filter.' : `Add your first ${config.singular} to start connecting your manufacturing work.`} /> : <>
-        <div className="table-scroll"><table><thead><tr><th>Name</th><th>{kind === 'products' ? 'Part number' : kind === 'suppliers' ? 'Type / relationship' : kind === 'contacts' ? 'Company supplier' : 'Description'}</th><th>{kind === 'products' ? 'Operations' : kind === 'contacts' || kind === 'suppliers' ? 'Contact details' : 'Updated'}</th><th><span className="sr-only">Open</span></th></tr></thead>
+        <div className="table-scroll"><table><thead><tr><th>Name</th><th>{kind === 'products' ? 'Part number' : kind === 'suppliers' ? 'Type / relationship' : kind === 'contacts' ? 'Company supplier' : 'Description'}</th>{kind === 'products' && <><th>Models</th><th>Stock</th><th>Minimum</th></>}<th>{kind === 'products' ? 'Operations' : kind === 'contacts' || kind === 'suppliers' ? 'Contact details' : 'Updated'}</th><th><span className="sr-only">Open</span></th></tr></thead>
           <tbody>{data.data.items.map(entity => <tr key={entity.id}><td><Link className="record-title" to={link(kind, entity.id)}>{entity.name}</Link></td>
             <td>{kind === 'products' ? value(entity, 'partNumber') || 'Not added'
               : kind === 'suppliers' ? `${value(entity, 'type') === 'company' ? 'Company' : 'Individual'} · ${value(entity, 'relationship') === 'internal' ? 'In-house' : 'External'}`
               : kind === 'contacts' ? <Link to={link('suppliers', value(entity, 'supplierId'))}>{names.get(value(entity, 'supplierId')) || 'Company supplier'}</Link>
               : <span className="bt-text">{value(entity, 'description') || 'Not added'}</span>}</td>
+            {kind === 'products' && <td>{(entity as Product).modelIds?.length ? (entity as Product).modelIds!.map(id => models.items.find(m => m.entityId === id)?.data.name || 'Loading model...').join(', ') : 'Common'}</td>}
+            {kind === 'products' && <><td>{(entity as Product).stockQuantity ?? 'Not set'}</td><td>{(entity as Product).minimumStockQuantity ?? 'Not set'}</td></>}
             <td>{kind === 'products' ? (entity as Product).stepIds.length
               : kind === 'contacts' || kind === 'suppliers' ? <>{value(entity, 'email') || 'No email'}<span className="cell-sub">{value(entity, 'phone') || 'No phone'}</span></>
               : new Date(entity.updatedAt).toLocaleDateString()}</td>
@@ -145,7 +167,11 @@ function References({ data, kind }: { data: ManufacturingDetail; kind: Directory
 export function BuildDetail({ kind }: { kind: Directory }) {
   const { id } = useParams();
   const resource = useManufacturingResource<ManufacturingDetail>(`/${kind}/${id}`);
+  const models = useDirectory<Revision<MachineModel>>(
+    kind === 'products' && (resource.data?.entity as Product | undefined)?.modelIds?.length ? '/models' : null,
+  );
   const [editing, setEditing] = useState(false);
+  const [editingStock, setEditingStock] = useState(false);
   const [addingContact, setAddingContact] = useState(false);
   const { refresh } = useManufacturing();
   if (resource.loading) return <Loading />;
@@ -156,12 +182,16 @@ export function BuildDetail({ kind }: { kind: Directory }) {
     <PageHeader eyebrow={`PRODUCTTRACKR / ${directories[kind].singular.toUpperCase()}`} title={entity.name}
       description={kind === 'products' ? value(entity, 'partNumber') || 'Product manufacturing plan' : kind === 'suppliers' ? `${value(entity, 'type') === 'company' ? 'Company' : 'Independent individual'} · ${value(entity, 'relationship') === 'internal' ? 'In-house' : 'External supplier'}` : kind === 'contacts' ? value(entity, 'designation') || 'Company contact' : 'Reusable manufacturing operation'}
       action={<div className="bt-record-actions">{kind === 'products' && <Link className="button primary" to={`/manufacturing/records/new?productId=${entity.id}`}><Plus size={15} />New manufacturing record</Link>}
+        {kind === 'products' && <button className="button" onClick={() => setEditingStock(true)}>Edit stock</button>}
         <button className="button" onClick={() => setEditing(true)}><Edit3 size={15} />Edit {directories[kind].singular}</button></div>} />
+    {models.error && <Alert>{models.error}</Alert>}
     <section className="panel details-panel bt-master-details"><dl className="unit-settings-summary">
       {fields[kind].filter(([key]) => !['name', 'type', 'relationship'].includes(key)).map(([key, label]) => <div key={key}><dt>{label}</dt>
         <dd>{key === 'supplierId' ? <Link to={link('suppliers', value(entity, key))}>{data.suppliers.find(p => p.id === value(entity, key))?.name || 'Company supplier'}</Link> : value(entity, key) || 'Not added'}</dd></div>)}
+      {kind === 'products' && <div><dt>Models</dt><dd>{(entity as Product).modelIds?.length ? (entity as Product).modelIds!.map(id => models.items.find(m => m.entityId === id)?.data.name || 'Loading model...').join(', ') : 'Common'}</dd></div>}
+      {kind === 'products' && <><div><dt>Stock quantity</dt><dd>{(entity as Product).stockQuantity ?? 'Not set'}</dd></div><div><dt>Minimum stock quantity</dt><dd>{(entity as Product).minimumStockQuantity ?? 'Not set'}</dd></div></>}
     </dl></section>
-    {kind === 'products' ? <><ProductFiles key={entity.id} productId={entity.id} /><ProductSteps data={data} /><ConnectedManufacturingRecords productId={entity.id} /></>
+    {kind === 'products' ? <><ProductFiles key={entity.id} productId={entity.id} /><ProductSteps data={data} /><ConnectedManufacturingRecords productId={entity.id} /><StockHistory productId={entity.id} /></>
       : kind === 'operations' ? <section className="panel bt-directory"><div className="bt-panel-heading"><h2>Products using this operation</h2><span>{data.steps.length} steps</span></div>
         {!data.steps.length ? <Empty title="Not used yet" text="Add this operation to a product to connect its own suppliers and contacts." />
           : <div className="table-scroll"><table><thead><tr><th>Product</th><th>Step</th><th>Product-specific instructions</th></tr></thead><tbody>{data.steps.map(s => {
@@ -180,6 +210,7 @@ export function BuildDetail({ kind }: { kind: Directory }) {
         <References data={data} kind={kind} />
       </>}
     {editing && <MasterEditor kind={kind} entity={entity} onClose={() => setEditing(false)} />}
+    {editingStock && <StockEditor key={entity.version} product={entity as Product} close={() => setEditingStock(false)} />}
     {addingContact && <MasterEditor kind="contacts" supplierId={entity.id} onClose={() => setAddingContact(false)} />}
   </>;
 }

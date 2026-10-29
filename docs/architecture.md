@@ -203,7 +203,8 @@ excluded with a warning; a changed file is never silently re-trusted. Legacy JSO
 timestamp uses the provider's file creation time. Listing never deletes files; rotation runs after
 verified backup creation or recovery, and invalid/unrelated files are never selected for pruning.
 Files inaccessible to the existing Drive OAuth scope can instead be uploaded through the restore UI;
-discovery does not broaden Drive permissions. Earlier revision-per-file ZIP backups remain readable.
+discovery does not broaden Drive permissions. Earlier archives remain untouched; create a fresh
+combined backup containing all current entities after a separately approved deployment.
 
 The fixed weekly preference is Sunday 02:00 `Asia/Kolkata`. Production scheduling is a separate
 provisioning step: Cloud Scheduler authenticates with OAuth/IAM to invoke a dedicated Cloud Run Job
@@ -311,3 +312,73 @@ indefinite retention after cloud billing suspension.
 Automated tests cover domain rules, default dates/corrections, references, idempotency, conditional-write races, ambiguous retries, local locking/restart recovery, legacy conflict preservation, interrupted/resumed migrations, exact backup/restore history preservation, one entity file after 100 edits, shared checkpoint reuse, IAP rejection, Drive pagination/cursor replay/error handling, and a 12,000-record/120,000-version synthetic projection. Browser checks cover a full sales journey and responsive navigation.
 
 The synthetic scale check verifies bounded current-record projections and no history-file downloads for warm list queries. It does not measure real Google network latency or quotas. Live Drive integration, the container build, and IAP deployment must be verified with the owner's project before production release.
+
+## Models, machines, and retained delivery facts
+
+In the shared Firestore configuration, Sales adds revisioned `model` and `sent_part` entity kinds.
+Account revisions embed machines with stable IDs; sales revisions embed catalog part lines with
+stable line IDs. Products retain their ProductTrackr IDs and optional `modelIds`; an empty list means
+Common. Derived `modelScopes` support compatible-product queries, including existing Common products.
+Model-name claims enforce normalized uniqueness without rewriting historical labels.
+
+The first sale closure publishes its parts using the Delivered milestone date. `partsPublished`
+retains that publication state through reopening. Deterministic record/line keys identify deliveries;
+subsequent corrections update or withdraw the same entities rather than inserting another shipment.
+Immutable payloads are staged first, then sale and affected ledger metadata/projections/counters
+commit in one transaction. Account/model heads, product versions, dataset generations, and maintenance
+fences are rechecked before writes. An ordinary notes save creates no delivery revision.
+
+Delivery revisions snapshot account, product, and optional machine/model labels. Date-only corrections
+preserve those snapshots. Source record references are not cascading foreign keys: record cleanup
+does not delete `sent_part` entities. History returns bounded current revision pages and identifies
+deleted sources without requiring their sales histories. Coverage aggregates active ledger projections,
+counting unassigned entries only for compatible machines at the same account.
+
+Manual deliveries use the same ledger, retry/stale-edit protection, date validation, and audit history.
+Corrections and voids require a reason; automatic entries can only be corrected through their sale.
+Duplicate manual facts prompt confirmation rather than silently merging legitimate deliveries.
+
+The existing combined backup structure and format numbers remain unchanged. Current Sales child
+archives add `models.json` and `sent-parts.json`; account machines and sale parts remain in their parent
+entity histories. Combined recovery validates current cross-workspace references and stages both
+datasets before activation. A retained delivery may reference an intentionally deleted source sale.
+The Products workbook resolves model names from a checked Sales snapshot and preserves the existing
+managed workbook and product folder identities. No new archive migration layer or Drive authorization
+is introduced.
+
+## Product stock and dispatch quantities
+
+New products require explicit nonnegative whole-unit stock and minimum quantities. New sale parts
+and manufacturing jobs require positive whole units. Historical missing quantities remain unknown;
+only newly created sources enter automatic stock tracking. Manual historical deliveries do not
+change stock. The former sales stock-confirmation command, fields, and pending queue are retired.
+
+`inventory.py` plans all balance changes inside the owning sale/job Firestore transaction. Retained
+`inventorySources` store the signed product effect already applied and pre-dispatch demand.
+Reconciliation applies only the difference and records immutable `stockMovements`, alongside product
+versions, source revisions/events, write receipts, and workspace sequences. Stable movement identities
+and existing receipt checks make retries safe. Generations, maintenance fences, current balances,
+reference versions, and transaction budgets are checked before any writes.
+
+Dispatch sums repeated products across machine lines and deducts atomically, rejecting insufficient
+stock without changing the sale. Delivered/Closed do not deduct again. Returning before Dispatch
+returns the retained deduction; returning only to Dispatched does not. Reasoned sent-part corrections
+apply net differences. Discarding/deleting a sent sale preserves its applied stock effect.
+Closed-based delivery-history publication remains independent of Dispatch-based stock posting.
+
+Only final manufacturing completion credits output. Reasoned quantity corrections reconcile the
+difference, including completed jobs. Undoing completion reverses the credit and is blocked if it
+would make stock negative. Cleanup preserves credited output, source positions, and movement audit.
+Product stock uses a dedicated versioned command, not ordinary metadata edits.
+
+Indexed product projections maintain combined open demand, low-stock status, and shortages.
+Demand includes non-discarded New lead/Follow-up/Order in hand sources and excludes sent sources;
+shortage is `max(demand - stock, 0)`. Low stock is strictly `stock < minimum`. Manufacturing in
+progress is shown for reference, never counted as actual stock. Reports link to all contributing
+sales and prefill manufacturing creation without automatically creating jobs.
+
+Current backups include source positions and movement history without changing archive versions.
+Validation checks movement arithmetic/chains, current balances, and source/demand consistency.
+Recovery restores all of these together without replay. Directory exports validate directory
+relationships and scalar quantities without loading the complete execution or movement history.
+The existing Products worksheet includes stock/minimum columns and retains its links and identity.

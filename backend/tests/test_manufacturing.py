@@ -39,6 +39,8 @@ def command(client, path, data, base=None, entity_id=None, method="POST", body=N
 
 
 def create(client, kind, **data):
+    if kind == "products":
+        data = {"stockQuantity": 1000, "minimumStockQuantity": 0, **data}
     response, body = command(client, "/" + kind, data)
     assert response.status_code == 200, response.text
     return client.get(f"/api/manufacturing/{kind}/{body['id']}").json()["entity"]
@@ -61,7 +63,9 @@ def step(client, product, operation):
 
 def test_directories_retry_versions_and_restart(app):
     client, settings = app
-    response, body = command(client, "/products", {"name": "Gear", "partNumber": "G-1"})
+    response, body = command(client, "/products", {
+        "name": "Gear", "partNumber": "G-1", "stockQuantity": 1000, "minimumStockQuantity": 0,
+    })
     assert response.status_code == 200
     assert command(client, "/products", {}, body=body)[0].json() == response.json()
     product = client.get(f"/api/manufacturing/products/{body['id']}").json()["entity"]
@@ -320,7 +324,9 @@ def test_edits_preserve_relationships_and_reject_foreign_references(app):
         client, f"/products/{product['id']}/steps", {"operationId": uuid4().hex},
         view["entity"]["version"],
     )[0].status_code == 404
-    response, body = command(client, "/products", {"name": "Receipt conflict"})
+    response, body = command(client, "/products", {
+        "name": "Receipt conflict", "stockQuantity": 0, "minimumStockQuantity": 0,
+    })
     assert response.status_code == 200
     body["data"]["name"] = "Different body"
     assert command(client, "/products", {}, body=body)[0].status_code == 409

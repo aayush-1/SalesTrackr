@@ -8,6 +8,7 @@ import { WorkspaceSwitcher } from '../workspace-switcher';
 import { directories } from './producttrackr';
 import { ConnectedManufacturingRecords } from './manufacturing-records';
 import { SupplierWorkSheet } from './supplier-work';
+import { RefreshContext } from '../api';
 
 export function ManufacturingShell() {
   const [open, setOpen] = useState(false);
@@ -34,8 +35,11 @@ export function ManufacturingShell() {
         <NavLink end to="/manufacturing" onClick={() => setOpen(false)}><LayoutDashboard size={18} />Overview</NavLink>
         <NavLink to="/manufacturing/records" onClick={() => setOpen(false)}><ClipboardList size={18} />Manufacturing records</NavLink>
         <NavLink to="/manufacturing/supplier-work" onClick={() => setOpen(false)}><Factory size={18} />Supplier work</NavLink>
+        <NavLink to="/manufacturing/order-shortages" onClick={() => setOpen(false)}><ClipboardList size={18} />Order in hand shortage</NavLink>
+        <NavLink to="/manufacturing/low-stock" onClick={() => setOpen(false)}><ClipboardList size={18} />Low stock</NavLink>
         <div className="nav-label">BUILD & CONNECT</div>
         {(Object.entries(directories) as [Directory, typeof directories[Directory]][]).map(([kind, { title, Icon }]) => <NavLink key={kind} to={`/manufacturing/${kind}`} onClick={() => setOpen(false)}><Icon size={18} />{title}</NavLink>)}
+        <NavLink to="/manufacturing/model-parts" onClick={() => setOpen(false)}><ClipboardList size={18} />Master Product's List</NavLink>
       </nav>
       <div className="unit-sidebar-note"><Factory size={18} /><strong>From process to progress</strong><p>Independent jobs. Clear responsibility. One operation at a time.</p></div>
       <div className="sidebar-bottom"><div className="avatar">P</div><div><strong>ProductTrackr</strong><small>Independent workspace</small></div>
@@ -49,7 +53,7 @@ export function ManufacturingShell() {
           : !meta ? <Loading /> : <ManufacturingContext.Provider value={{ meta, version, refresh, workspaceChanged, noteWorkspaceChange }}>
             {meta.mode === 'demo' && <div className="unit-preview-notice"><span>LOCAL PRODUCTTRACKR</span>Saved in a local Firestore emulator. Shared Settings manages backup, recovery and exports.</div>}
             {workspaceChanged && <Alert>ProductTrackr was restored in another session. Old forms cannot be saved. <button className="text-button" onClick={() => window.location.reload()}>Reload ProductTrackr</button></Alert>}
-            <Outlet />
+            <RefreshContext.Provider value={{ version, lastSave: null, refresh }}><Outlet /></RefreshContext.Provider>
           </ManufacturingContext.Provider>}
       </main>
       <footer>ProductTrackr<span className="sync-status"><span>Independent manufacturing workspace</span><button className="icon-button" aria-label="Refresh manufacturing data" title="Refresh manufacturing data" onClick={refresh}><RefreshCw size={14} /></button></span></footer>
@@ -83,7 +87,7 @@ export function ManufacturingOverview() {
     <div className="unit-section-title"><h2>Your manufacturing directories</h2><span>Reusable processes. Connected people.</span></div>
     <div className="unit-area-grid bt-area-grid">{(Object.keys(directories) as Directory[]).map(kind => <DirectoryCard key={kind} kind={kind} />)}</div>
     <section className="unit-next-step"><span className="unit-area-icon"><Factory size={21} /></span><div><h2>A process defines the route. A record tracks the work.</h2>
-      <p>Products hold reusable operation sequences and linked supplier choices. Manufacturing records copy those operations into independent jobs, then track explicit assignments and completions. Inventory, batching and costing are not included.</p></div></section>
+      <p>Products hold reusable operation sequences and stock quantities. Manufacturing records track each job and add its quantity to stock when every operation is complete.</p></div></section>
   </>;
 }
 
