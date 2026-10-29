@@ -8,6 +8,7 @@ from backend.app.domain import Problem
 from backend.app.manufacturing_backups import ManufacturingBackupManager
 from backend.app.manufacturing_cleanup import ManufacturingCleanup
 from backend.app.manufacturing_storage import ManufacturingRepository, deleted_record_receipt
+from backend.app.shared_backups import SharedBackupManager
 from backend.tests.test_manufacturing import app as app
 from backend.tests.test_manufacturing import command
 from backend.tests.test_manufacturing_backups import backup, headers, inspect, restore
@@ -20,7 +21,7 @@ PATH = "/api/manufacturing/settings/record-cleanup"
 def finished(client, product, company):
     current, sent = job(client, product)
     while current["status"] != "completed":
-        current = apply(client, current, "assign", partnerId=company["id"])
+        current = apply(client, current, "assign", supplierId=company["id"])
         current = apply(client, current, "complete")
     return current, sent
 
@@ -57,7 +58,7 @@ def test_selected_completed_jobs_and_history_are_removed_but_shared_data_and_cou
     assert remove(client, body) == result
     assert client.get(f"/api/manufacturing/records/{first['id']}").status_code == 404
     after, _ = repo.snapshot()
-    for kind in ("products", "operations", "partners", "contacts", "steps", "assignments", "sequences"):
+    for kind in ("products", "operations", "suppliers", "contacts", "steps", "assignments", "sequences"):
         assert after[kind] == before[kind]
     assert after["manufacturingRecords"] == {
         key: row for key, row in before["manufacturingRecords"].items() if key != first["id"]
@@ -79,9 +80,9 @@ def test_selected_completed_jobs_and_history_are_removed_but_shared_data_and_cou
     new, _ = job(client, product)
     assert new["number"] == "MFG-00004"
     assert client.get("/api/accounts").json()["items"] == sales
-    manager = ManufacturingBackupManager(repo, settings)
+    manager = client.app.state.recovery
     saved, _ = manager.read_archive(manager.get(result["recoveryBackup"]["id"])[0])
-    assert saved == before
+    assert saved["manufacturing"] == before
     assert not repo.workspace.get().to_dict().get("pendingRecordCleanup")
 
 
@@ -90,7 +91,7 @@ def test_non_completed_jobs_are_protected_without_creating_backups(process, stat
     client, settings, product, company, *_ = process
     current, _ = job(client, product)
     if status == "in_progress":
-        current = apply(client, current, "assign", partnerId=company["id"])
+        current = apply(client, current, "assign", supplierId=company["id"])
     elif status == "cancelled":
         current = apply(client, current, "cancel", reason="Not completed")
     remove(client, request(current), 409)
@@ -107,7 +108,7 @@ def test_confirmation_identity_stale_selection_and_permission_are_enforced(proce
     remove(client, {**body, "records": body["records"] * 2}, 422)
     remove(client, body, 409, {**headers(client), "X-ProductTrackr-Generation": uuid4().hex})
     remove(client, body, 409, {**headers(client), "X-ProductTrackr-Workspace": uuid4().hex})
-    with patch.object(ManufacturingBackupManager, "admin", return_value=False):
+    with patch.object(SharedBackupManager, "admin", return_value=False):
         assert client.get(PATH).json()["canDelete"] is False
         remove(client, body, 403)
     reopened = apply(
@@ -133,7 +134,7 @@ def test_backup_failure_never_deletes_jobs_and_same_attempt_can_retry(process):
     assert client.get(PATH).json()["pending"] is None
     result = remove(client, body)
     assert result["deletedCount"] == 1
-    assert len(client.get("/api/manufacturing/settings/backup-recovery").json()["backups"]) == 1
+    assert len(client.get("/api/settings/backup-recovery").json()["backups"]) == 1
 
 
 def test_interrupted_cleanup_is_resumable_blocks_mutations_backups_and_restores(process):
@@ -149,7 +150,7 @@ def test_interrupted_cleanup_is_resumable_blocks_mutations_backups_and_restores(
     assert state["cleanupInProgress"] is True
     assert command(client, "/products", {"name": "Cannot save during pending cleanup"})[0].status_code == 503
     response = client.post(
-        "/api/manufacturing/backups", json={"writeId": uuid4().hex}, headers=headers(client)
+        "/api/backups", json={"writeId": uuid4().hex}, headers=headers(client)
     )
     assert response.status_code == 503
     restore(client, manual, preview, expected=409)
@@ -160,7 +161,7 @@ def test_interrupted_cleanup_is_resumable_blocks_mutations_backups_and_restores(
     assert remove(client, body) == result
     assert client.get(PATH).json()["pending"] is None
     assert command(client, "/products", {"name": "Saving works after cleanup"})[0].status_code == 200
-    assert len(ManufacturingBackupManager(ManufacturingRepository(settings), settings).rows()) == 2
+    assert len(client.app.state.recovery.rows()) == 2
 
 
 def test_multiple_delete_batches_do_not_double_count_after_lost_commit_response(process):
@@ -205,7 +206,7 @@ def test_receipts_for_an_unrelated_entity_with_same_id_are_never_deleted(process
 def test_backup_race_cannot_delete_a_job_reopened_after_selection(process):
     client, _, product, company, *_ = process
     current, _ = finished(client, product, company)
-    original = ManufacturingBackupManager.backup
+    original = SharedBackupManager.backup
 
     def raced(self, *args, **kwargs):
         apply(
@@ -217,7 +218,7 @@ def test_backup_race_cannot_delete_a_job_reopened_after_selection(process):
         )
         return original(self, *args, **kwargs)
 
-    with patch.object(ManufacturingBackupManager, "backup", raced):
+    with patch.object(SharedBackupManager, "backup", raced):
         remove(client, request(current), 409)
     assert record(client, current["id"])["record"]["status"] == "in_progress"
     assert client.get(PATH).json()["pending"] is None

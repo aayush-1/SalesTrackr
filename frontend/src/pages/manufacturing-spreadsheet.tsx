@@ -18,7 +18,7 @@ const labels: [string, string, string][] = [
   ['steps', 'Product operations', 'Step order, instructions and all supplier choices, with the primary highlighted.'],
   ['assignments', 'Supplier links', 'Every supplier option and its selected company contact.'],
   ['operations', 'Operations', 'All reusable operations, including unused ones.'],
-  ['partners', 'Suppliers', 'Companies, individuals, contact details and internal/external relationships.'],
+  ['suppliers', 'Suppliers', 'Companies, individuals, contact details and internal/external relationships.'],
   ['contacts', 'Contacts', 'All company contacts, with their owning supplier.'],
 ];
 const keyDescriptions = [
@@ -88,7 +88,7 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
       setStatus(old => ({ ...old, spreadsheet: result, lastError: null }));
       setNotice(result.provider === 'local'
         ? 'Spreadsheet updated and verified locally. Nothing was uploaded to Google Drive.'
-        : 'The same directory workbook was updated and verified in your ProductTrackr Drive folder.');
+        : 'The same directory workbook was updated and verified in your SalesTrackr Drive folder.');
       refresh();
     } catch (reason) {
       if (reason instanceof ManufacturingError && reason.code === 'workspace_changed') noteWorkspaceChange();
@@ -103,7 +103,7 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
   return <div className="backup-settings">
     <div className="alert warning"><FileSpreadsheet size={18} /><span>{local
       ? 'Local preview only. This updates a downloadable XLSX on this computer, not Google Drive.'
-      : 'Exports use your private ProductTrackr folder. The same managed workbook is updated, not a new copy each time.'}</span></div>
+      : 'Exports use your private SalesTrackr folder. The same managed workbook is updated, not a new copy each time.'}</span></div>
     <section className="panel details-panel settings-section">
       <div className="section-heading compact">
         <div><h2><FileSpreadsheet size={19} />Directory spreadsheet</h2>
@@ -137,7 +137,7 @@ function SpreadsheetControls({ initial }: { initial: ExportStatus }) {
         {local && <p className="muted">Open spreadsheet is available after a Google Drive export. This local preview only provides a download.</p>}
       </div>}
       <RelationshipKeyHelp />
-      {status.folderUrl && <p><a href={status.folderUrl} target="_blank" rel="noreferrer">Configured ProductTrackr folder</a>
+      {status.folderUrl && <p><a href={status.folderUrl} target="_blank" rel="noreferrer">Open SalesTrackr folder</a>
         {local && ' (not used by this local export)'}</p>}
       <p className="muted">Manufacturing jobs, history and write receipts are not included. This report is not a recovery
         backup; use Data &amp; recovery for a full workspace backup. SalesTrackr is not changed.</p>

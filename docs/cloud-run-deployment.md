@@ -148,28 +148,30 @@ ProductTrackr runs at `/manufacturing` in the same IAP-protected application. Ev
 API request uses the existing signed-IAP-token verification and browser mutation protections;
 the browser receives no Firestore or Drive credentials. Do not disable IAP or use demo mode.
 
-`producttrackr.production.json` defines the production-only storage identity:
+`producttrackr.production.json` defines the manufacturing database/workspace identity.
+Settings and recovery are always shared; no additional feature flag is required.
 
 | Resource | Configuration |
 |---|---|
 | Firestore project | Existing `GCP_PROJECT_ID` Actions variable |
 | Firestore database | Existing `(default)` database, shared with SalesTrackr |
 | Workspace | `producttrackr` |
-| Drive root | Existing ProductTrackr folder `1CptlMKXkdMOBgdQ-lnAlJA-yG7fSD6L3` |
-| Product files | `ProductTrackr / Products / <part number - name>` |
-| ZIP backups | `ProductTrackr / Backups` |
-| Directory workbook | `ProductTrackr / ProductTrackr Directory.xlsx` |
-| OAuth secret | `producttrackr-drive-oauth`, pinned numeric version from the JSON file |
+| Drive root | Existing SalesTrackr `GOOGLE_FOLDER_ID` |
+| Product files | `SalesTrackr / Products / <part number - name>` |
+| Combined ZIP backups | `SalesTrackr / Backups`, the existing dedicated `BACKUP_DRIVE_FOLDER_ID` |
+| Directory workbook | `SalesTrackr / ProductTrackr Directory.xlsx` |
+| OAuth secret | Existing pinned SalesTrackr `GOOGLE_TOKEN_JSON` secret reference |
 
-This is a new production workspace; no local demo records are copied into it. Configuration,
+No local demo records are copied into production. Configuration,
 headers, storage paths, Drive tags and archive format use ProductTrackr names. Local testing
 continues to use `demo-producttrackr-*` projects, a localhost emulator and local backups.
-Production refuses emulator configuration, demo projects, local backup storage, a shared sales
-workspace or Drive root, missing ProductTrackr OAuth credentials or missing administrators.
+Production refuses emulator configuration, demo projects, local backup storage, mismatched
+databases, a shared sales workspace ID, missing shared Drive credentials or missing administrators.
 
 Data remains isolated at `workspaces/salestrackr/...` and `workspaces/producttrackr/...`.
-ProductTrackr snapshots, restore pointers and maintenance leases are scoped to its own workspace,
-not the entire database. Both apps share the default database's free quota. Additional named
+Both workspace snapshots, restore pointers and maintenance leases are coordinated for shared
+recovery; activation updates both workspace documents in one transaction. Other workspaces in
+the database are unaffected. Both apps share the default database's free quota. Additional named
 databases do not receive that free quota; using separate Drive backups does not require one.
 These app-generated ZIPs use normal Firestore reads, not Google's billed managed-backup product.
 See [Firestore pricing](https://cloud.google.com/firestore/pricing) for limits and usage charges.
@@ -186,22 +188,24 @@ gcloud auth login
 
 The script reuses the existing database and runtime service account's Firestore authorization.
 If access is missing, it grants `roles/datastore.user` conditionally for the configured database.
-It uploads the protected ProductTrackr OAuth file into its separate secret and grants the runtime
-accessor on that secret.
+It reuses the existing SalesTrackr Drive root and pinned credential; no second OAuth file,
+secret upload, or separate Drive authorization is required.
 It applies the ProductTrackr composite indexes and large-field indexing exemptions from
 `firestore.indexes.json`, then checks that the required indexes are ready. It is restartable:
-existing database, secret versions and indexes are retained. The script does not update the
+existing database, shared secret references and indexes are retained. The script does not update the
 running application, SalesTrackr's records, secret references or traffic.
 
-The default token path is `.secrets\drive-token-producttrackr-authorized.json`; use
-`-DriveTokenFile` to select another protected, owner-authorized file. Never commit credentials.
-The configured version must match the uploaded numeric version; update the JSON file deliberately
-when reconnecting. Use the same OAuth client so existing app-private folder IDs remain visible.
-Ensure the Google OAuth consent application is configured for production: external applications
-left in Testing can issue refresh tokens that expire after seven days.
+Before deploying this change on an existing installation, retain both legacy backups and verify
+SalesTrackr authorization can access the existing product files and app-private tags. Move the
+existing Products folder and directory workbook into SalesTrackr without changing their IDs;
+register that Products folder on the shared root and update the workbook's saved root reference.
+Keep old archives. Verify all product URLs, workbook links and a combined backup/recovery before
+deleting the old ProductTrackr root or revoking its authorization. Local preview performs none
+of these production operations.
 
 Set `PRODUCTTRACKR_ADMIN_EMAILS` as a comma-separated variable in the **production** GitHub
-environment to choose ProductTrackr's restore, cleanup and spreadsheet administrators. If absent,
+environment to choose ProductTrackr's cleanup and spreadsheet administrators. Combined recovery
+requires membership in both recovery and manufacturing administrator lists. If absent,
 the workflow uses the existing production recovery administrators without changing SalesTrackr's
 administrator setting. Missing administrators stop deployment before changing the service.
 
@@ -214,30 +218,33 @@ Run this in a terminal without local emulator environment variables:
   --project $ProjectId --region $Region --service $Service --backup
 ```
 
-This verifies `firestore.rules` on the shared database, publishing it only if no release exists and
+Run only after the Drive migration has been reviewed and completed. This verifies `firestore.rules`
+on the shared database, publishing it only if no release exists and
 refusing to replace a different existing policy. These rules deny all direct browser/client database
 access; authenticated server operations use IAM. The command reads the pinned credential from Secret Manager, initializes
-the production workspace control document, verifies directory queries and existing Drive folders,
-and creates/read-back-verifies a real production ZIP backup when `--backup` is supplied. No synthetic
+the production workspace control document, verifies directory queries and shared Drive folders,
+and creates/read-back-verifies a real combined ZIP backup when `--backup` is supplied. No synthetic
 business records or directory workbook are created. Collections appear when their first records
 are written; models and transactional relationship checks define the schema in application code.
 
 ### Deploy after local acceptance
 
-Push/merge to `main` or run the existing deployment workflow after local testing. The same image
-update atomically enables ProductTrackr and injects its `PRODUCTTRACKR_*` production variables and
-the pinned `PRODUCTTRACKR_DRIVE_TOKEN_JSON` secret. The workflow verifies all other runtime settings,
-SalesTrackr secret references, runtime identity, IAP and scaling limits remain unchanged.
+Push/merge to `main` or run the existing deployment workflow only after local acceptance and
+verified Drive migration. The same image update supplies the manufacturing workspace settings
+and removes the obsolete ProductTrackr root and secret environment references. It does not revoke
+or delete a stored credential. The workflow verifies SalesTrackr secret references, runtime
+identity, IAP, scaling limits and all other runtime settings remain unchanged.
 
 After deployment, verify an authorized browser can create a product, supplier and operation;
 unauthorized access is denied; product data persists after redeployment; and Settings reports Drive,
 not local storage. **Back up now to Drive** must create a ZIP inside **Backups**. On the first
-**Update spreadsheet**, the app creates one XLSX directly in the ProductTrackr root if none exists;
+**Update spreadsheet**, the app creates one XLSX directly in the SalesTrackr root if none exists;
 later updates reuse its ID. Product pages create/link folders under **Products**, and name or
 part-number edits rename that same folder without changing its ID or files.
 
-Manual backups and pre-restore safety backups are configured. ProductTrackr does not inherit
-SalesTrackr's weekly scheduler; its schedule is reported inactive until separately configured.
+Manual, pre-cleanup and pre-restore safety backups include both Trackrs. The existing SalesTrackr
+weekly backup entrypoint uses the same combined format and shared schedule preference; it
+continues to report inactive when no scheduler has been provisioned.
 Drawings remain in Drive and are not embedded in ZIP backups.
 
 For the one-file storage upgrade, deploy the migration-aware image first, then run the [maintenance migration](architecture.md#migrating-an-existing-revision-file-workspace). The new image intentionally refuses the legacy storage layout until that operation completes. A successful container rollout alone does not imply data migration success. Do not roll back to a version-1-only image after migrating the Drive root.

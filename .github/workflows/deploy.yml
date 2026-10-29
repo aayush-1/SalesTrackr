@@ -152,8 +152,6 @@ jobs:
           (folder / "producttrackr-expected.json").write_text(json.dumps(expected))
           values = {key: item["value"] for key, item in expected.items() if "value" in item}
           (folder / "producttrackr-env.txt").write_text("^|^" + "|".join(f"{key}={value}" for key, value in values.items()))
-          secret = expected["PRODUCTTRACKR_DRIVE_TOKEN_JSON"]["valueFrom"]["secretKeyRef"]
-          (folder / "producttrackr-secret.txt").write_text(f"PRODUCTTRACKR_DRIVE_TOKEN_JSON={secret['name']}:{secret['key']}")
           PY
           digest="$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
@@ -161,7 +159,8 @@ jobs:
             --region="$GCP_REGION" \
             --image="${IMAGE%:*}@${digest}" \
             --update-env-vars="$(cat "$RUNNER_TEMP/producttrackr-env.txt")" \
-            --update-secrets="$(cat "$RUNNER_TEMP/producttrackr-secret.txt")" \
+            --remove-env-vars=PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID \
+            --remove-secrets=PRODUCTTRACKR_DRIVE_TOKEN_JSON \
             --min=0 --max=1 --min-instances=0 --max-instances=1 \
             --quiet
           gcloud run services describe "$CLOUD_RUN_SERVICE" --region="$GCP_REGION" --format=json > "$RUNNER_TEMP/service-after.json"
@@ -177,8 +176,10 @@ jobs:
           old_env = {item["name"]: item for item in old_spec["containers"][0]["env"]}
           new_env = {item["name"]: item for item in new_spec["containers"][0]["env"]}
           expected = json.loads((folder / "producttrackr-expected.json").read_text())
-          assert {key: item for key, item in old_env.items() if key not in expected} == {key: item for key, item in new_env.items() if key not in expected}, "SalesTrackr runtime settings or secret references changed."
-          assert all(new_env.get(key) == item for key, item in expected.items()), "ProductTrackr runtime settings or secret reference do not match."
+          removed = {"PRODUCTTRACKR_BACKUP_DRIVE_FOLDER_ID", "PRODUCTTRACKR_DRIVE_TOKEN_JSON"}
+          assert {key: item for key, item in old_env.items() if key not in expected and key not in removed} == {key: item for key, item in new_env.items() if key not in expected and key not in removed}, "SalesTrackr runtime settings or secret references changed."
+          assert not removed.intersection(new_env), "Legacy ProductTrackr Drive configuration remains."
+          assert all(new_env.get(key) == item for key, item in expected.items()), "ProductTrackr runtime settings do not match."
           assert old_spec["serviceAccountName"] == new_spec["serviceAccountName"], "Runtime identity changed."
           assert after["metadata"]["annotations"].get("run.googleapis.com/iap-enabled") == "true", "IAP is not enabled."
           assert after["metadata"]["annotations"].get("run.googleapis.com/maxScale") == "1", "Service instance limit changed."
@@ -193,7 +194,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"url={url}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write(f"### SalesTrackr and ProductTrackr deployed\n\n[Open SalesTrackr]({url}) | [Open ProductTrackr]({url}/manufacturing)\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\nSalesTrackr's existing settings, secret references, runtime identity, and IAP protection were retained. ProductTrackr shares the database but uses its own workspace, Drive root and pinned OAuth secret.\n")
+              output.write(f"### SalesTrackr and ProductTrackr deployed\n\n[Open SalesTrackr]({url}) | [Open ProductTrackr]({url}/manufacturing)\n\nCommit: `{os.environ['GITHUB_SHA']}`\n\nBoth Trackrs share Settings, combined recovery, and SalesTrackr's Drive root and authorization. Their database workspaces remain distinct. SalesTrackr's secret references, runtime identity and IAP protection were retained; the legacy ProductTrackr secret reference was removed, not revoked.\n")
           PY
       - name: Confirm anonymous access is blocked
         env:

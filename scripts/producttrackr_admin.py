@@ -13,8 +13,10 @@ from google.cloud import firestore
 from google.oauth2.credentials import Credentials
 
 from backend.app.config import Settings
-from backend.app.manufacturing_backups import ManufacturingBackupManager, read_archive
+from backend.app.firestore_storage import FirestoreRepository
+from backend.app.manufacturing_backups import ManufacturingDriveBackupStore
 from backend.app.manufacturing_storage import ManufacturingRepository
+from backend.app.shared_backups import SharedBackupManager
 from scripts.producttrackr_deploy import CONFIG, production_environment
 
 
@@ -82,23 +84,27 @@ def main():
     session = requests.Session()
     session.headers["Authorization"] = f"Bearer {access_token}"
     database_rules(session, args.project, config["database"])
+    secret_ref = next(row["valueFrom"]["secretKeyRef"] for row in
+                      service["spec"]["template"]["spec"]["containers"][0]["env"]
+                      if row["name"] == "GOOGLE_TOKEN_JSON")
     secret = session.get(
         f"https://secretmanager.googleapis.com/v1/projects/{args.project}/secrets/"
-        f"{config['driveSecret']}/versions/{config['driveSecretVersion']}:access", timeout=30,
+        f"{secret_ref['name']}/versions/{secret_ref['key']}:access", timeout=30,
     )
     secret.raise_for_status()
     token = base64.b64decode(secret.json()["payload"]["data"]).decode()
     settings = Settings(
-        "production", Path(".local-data"), values["GOOGLE_FOLDER_ID"], "",
+        "production", Path(".local-data"), values["GOOGLE_FOLDER_ID"], token,
         values["IAP_AUDIENCE"], values["PUBLIC_ORIGIN"], False,
+        storage_backend="firestore",
         firestore_project=values.get("FIRESTORE_PROJECT_ID", ""),
         firestore_database=values.get("FIRESTORE_DATABASE_ID", "(default)"),
         firestore_workspace=values.get("FIRESTORE_WORKSPACE_ID", "salestrackr"),
         backup_folder_id=values.get("BACKUP_DRIVE_FOLDER_ID", ""),
         manufacturing_enabled=True, manufacturing_project=args.project,
         manufacturing_database=config["database"], manufacturing_workspace=config["workspace"],
-        manufacturing_backup_folder_id=config["driveRootId"], manufacturing_backup_storage="drive",
-        manufacturing_token_json=token,
+        manufacturing_backup_storage="drive",
+        recovery_admins=tuple(values.get("RECOVERY_ADMIN_EMAILS", "").split(",")),
         manufacturing_admins=tuple(environment["PRODUCTTRACKR_ADMIN_EMAILS"]["value"].split(",")),
     )
     settings.validate_manufacturing()
@@ -108,17 +114,18 @@ def main():
     )
     repository = ManufacturingRepository(settings, client=client)
     data, _ = repository.snapshot()
-    for kind in ("products", "operations", "partners", "contacts"):
-        repository.list(kind, "readiness", partner_id="readiness-supplier" if kind == "contacts" else None)
-    manager = ManufacturingBackupManager(repository, settings)
-    root = manager.store._root_folder()
-    products = manager.store.products_folder()
+    for kind in ("products", "operations", "suppliers", "contacts"):
+        repository.list(kind, "readiness", supplier_id="readiness-supplier" if kind == "contacts" else None)
+    manager = SharedBackupManager(FirestoreRepository(settings, client=client), settings)
+    files = ManufacturingDriveBackupStore(settings)
+    root = files._root_folder()
+    products = files.products_folder()
     backups = manager.store._folder()
     result = {
         "database": config["database"], **repository.meta(),
         "counts": {kind: len(rows) for kind, rows in data.items() if isinstance(rows, dict)},
-        "rootVerified": root == config["driveRootId"], "productsFolderId": products,
-        "backupsFolderId": backups, "driveSecretVerified": True, "browserDatabaseAccess": "denied",
+        "rootVerified": root == settings.root_id, "productsFolderId": products,
+        "backupsFolderId": backups, "sharedDriveSecretVerified": True, "browserDatabaseAccess": "denied",
     }
     anonymous = requests.get(
         f"https://firestore.googleapis.com/v1/projects/{args.project}/databases/{config['database']}"
@@ -129,8 +136,8 @@ def main():
     if args.backup:
         row = manager.backup(uuid4().hex, "production-setup")
         content, _ = manager.get(row["id"])
-        restored, _ = read_archive(content)
-        if restored != data:
+        restored, _ = manager.read_archive(content)
+        if restored["manufacturing"] != data:
             raise RuntimeError("The verified backup does not match the production snapshot.")
         result["verifiedBackupId"] = row["id"]
     print(json.dumps(result, indent=2))

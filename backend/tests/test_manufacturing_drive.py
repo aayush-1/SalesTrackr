@@ -1,6 +1,6 @@
 import re
 from copy import deepcopy
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -135,7 +135,7 @@ def test_inventory_keeps_root_name_and_moves_only_managed_backup_zips(drive):
     backend, rows, _, _ = drive
     store = object.__new__(ManufacturingDriveBackupStore)
     store.backend = backend
-    store.folder_id, store.sales_folders, store.folder_url = "manufacturing-root", set(), None
+    store.folder_id, store.folder_url, store.settings = "manufacturing-root", None, Mock()
     rows["managed"] = {
         "id": "managed", "name": "ProductTrackr-manual.zip", "parents": ["manufacturing-root"],
         "mimeType": "application/zip", "appProperties": {"app": store.app}, "trashed": False,
@@ -155,7 +155,10 @@ def test_inventory_keeps_root_name_and_moves_only_managed_backup_zips(drive):
         "appProperties": {"app": "producttrackr-backups"}, "trashed": False,
     }
     rows["manufacturing-root"]["appProperties"]["producttrackr_backups"] = "backups-folder"
-    assert [row["id"] for row in store.inventory()] == ["managed"]
+    with patch("backend.app.manufacturing_backups.DriveBackupStore") as shared:
+        shared.return_value._folder.return_value = "backups-folder"
+        assert [row["id"] for row in store.inventory()] == ["managed"]
+    shared.assert_called_once_with(store.settings)
     assert rows["manufacturing-root"]["name"] == "ProductTrackr"
     assert rows["managed"]["parents"] == ["backups-folder"]
     assert rows["unrelated"]["parents"] == ["manufacturing-root"]

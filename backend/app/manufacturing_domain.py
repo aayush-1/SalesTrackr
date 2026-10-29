@@ -4,12 +4,12 @@ from pydantic import Field, model_validator
 
 from .domain import Identifier, Model, Name, Text
 
-Directory = Literal["products", "operations", "partners", "contacts"]
+Directory = Literal["products", "operations", "suppliers", "contacts"]
 
 
 class Product(Model):
     name: Name
-    reference: Text = ""
+    partNumber: Text = ""
     notes: Text = ""
 
 
@@ -18,7 +18,7 @@ class Operation(Model):
     description: Text = ""
 
 
-class Partner(Model):
+class Supplier(Model):
     name: Name
     type: Literal["company", "individual"] = "company"
     relationship: Literal["external", "internal"] = "external"
@@ -36,7 +36,7 @@ class Partner(Model):
 
 class Contact(Model):
     name: Name
-    partnerId: Identifier
+    supplierId: Identifier
     designation: Text = ""
     email: Text = ""
     phone: Text = ""
@@ -48,7 +48,7 @@ class Step(Model):
 
 
 class Assignment(Model):
-    partnerId: Identifier
+    supplierId: Identifier
     contactId: Identifier | None = None
     notes: Text = ""
 
@@ -72,4 +72,4 @@ class Command(Model):
     data: dict
 
 
-MODELS = {"products": Product, "operations": Operation, "partners": Partner, "contacts": Contact}
+MODELS = {"products": Product, "operations": Operation, "suppliers": Supplier, "contacts": Contact}

@@ -39,6 +39,7 @@ test('real Firestore demo backs up, downloads, restores selected and uploaded ar
   const settings = async () => {
     await page.getByRole('link', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+    await page.getByRole('tab', { name: 'Backup and recovery', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Create simulated backup', exact: true })).toBeVisible();
   };
   const inspect = async (backup: Backup) => {

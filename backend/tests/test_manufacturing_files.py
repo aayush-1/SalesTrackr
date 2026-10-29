@@ -10,11 +10,11 @@ from fastapi.testclient import TestClient
 
 from backend.app.domain import Problem
 from backend.app.main import create_app
-from backend.app.manufacturing_backups import read_archive
 from backend.app.manufacturing_storage import ManufacturingRepository
 from backend.tests.test_manufacturing import app as app
 from backend.tests.test_manufacturing import command, create
 from backend.tests.test_manufacturing_backups import backup, headers, inspect, restore
+from backend.tests.test_manufacturing_backups import product_slice as read_archive
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def configured_app(app):
     _, original = app
     settings = replace(
         original, token_json="configured-test-credential",
-        manufacturing_backup_folder_id="manufacturing-root",
+        root_id="manufacturing-root",
     )
     with TestClient(create_app(settings)) as client:
         yield client, settings
@@ -100,8 +100,8 @@ def test_unconfigured_files_do_not_connect_to_drive_and_stale_requests_are_fence
 def test_folders_are_per_product_and_stay_linked_after_renaming_and_lost_local_mapping(configured_app, drive):
     client, settings = configured_app
     store, rows, files = drive
-    product = create(client, "products", name="Gear", reference="G-042")
-    other = create(client, "products", name="Gear", reference="G-042")
+    product = create(client, "products", name="Gear", partNumber="G-042")
+    other = create(client, "products", name="Gear", partNumber="G-042")
     first = folder(client, product)
     assert first["configured"] is True
     assert len(rows) == 2  # Product creation already provisioned both folders.
@@ -110,7 +110,7 @@ def test_folders_are_per_product_and_stay_linked_after_renaming_and_lost_local_m
     assert folder(client, product) == first
     assert folder(client, other)["url"] != first["url"]
     response, _ = command(
-        client, f"/products/{product['id']}", {"name": "Renamed", "reference": "G-043"},
+        client, f"/products/{product['id']}", {"name": "Renamed", "partNumber": "G-043"},
         product["version"], product["id"], "PUT",
     )
     assert response.status_code == 200
@@ -121,10 +121,10 @@ def test_folders_are_per_product_and_stay_linked_after_renaming_and_lost_local_m
     assert folder(client, product) == first
     assert files.create.call_count == len(rows) == 2
     assert store.backend.allocate.call_count == 2
-    assert repo.snapshot()[0]["products"][product["id"]]["reference"] == "G-043"
+    assert repo.snapshot()[0]["products"][product["id"]]["partNumber"] == "G-043"
     saved = repo.read("products", product["id"])
     response, _ = command(
-        client, f"/products/{product['id']}", {"name": "Name only", "reference": ""},
+        client, f"/products/{product['id']}", {"name": "Name only", "partNumber": ""},
         saved["version"], product["id"], "PUT",
     )
     assert response.status_code == 200
@@ -184,12 +184,12 @@ def test_backed_up_links_recover_missing_mappings_without_drive_search(configure
     product = create(client, "products", name="Recover original folder")
     first = folder(client, product)
     saved = backup(client)
-    content = client.get(f"/api/manufacturing/backups/{saved['id']}/download").content
+    content = client.get(f"/api/backups/{saved['id']}/download").content
     data, manifest = read_archive(content)
-    assert manifest["version"] == 2
+    assert manifest["version"] == 3
     links = data["productFolders"]
     assert links["identity"] == settings.manufacturing_identity()
-    assert links["rootId"] == settings.manufacturing_backup_folder_id
+    assert links["rootId"] == settings.root_id
     assert links["folders"][product["id"]]["url"] == first["url"]
     repo = ManufacturingRepository(settings)
     reference = repo.workspace.collection("productFolders").document(product["id"])
@@ -199,7 +199,7 @@ def test_backed_up_links_recover_missing_mappings_without_drive_search(configure
     recovered = ManufacturingRepository(settings)
     assert recovered.snapshot()[0]["productFolders"] == links
     other_root = ManufacturingRepository(replace(
-        settings, manufacturing_backup_folder_id="different-manufacturing-root",
+        settings, root_id="different-manufacturing-root",
     ))
     assert other_root.restored_product_folder(product["id"]) is None
     assert other_root.product_folders(data["products"])["folders"] == {}
@@ -241,7 +241,7 @@ def test_restore_preserves_newer_mappings_and_unbacked_up_recovery_links(configu
 def test_existing_product_folder_moves_under_products_without_changing_its_id(configured_app, drive):
     client, settings = configured_app
     _, rows, files = drive
-    product = create(client, "products", name="Existing drawing folder", reference="OLD-001")
+    product = create(client, "products", name="Existing drawing folder", partNumber="OLD-001")
     first = folder(client, product)
     repo = ManufacturingRepository(settings)
     reference = repo.workspace.collection("productFolders").document(product["id"])

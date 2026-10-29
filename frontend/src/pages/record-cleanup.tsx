@@ -57,7 +57,7 @@ export function RecordCleanup({ demo }: { demo: boolean }) {
       if (inFlight.current || pending) { event.preventDefault(); event.returnValue = ''; }
     };
     const navigate = (event: MouseEvent) => {
-      const anchor = event.target instanceof Element ? event.target.closest('a[href]') : null;
+      const anchor = event.target instanceof Element ? event.target.closest('a[href], [role="tab"]') : null;
       if (anchor && (inFlight.current || pending)) {
         event.preventDefault(); event.stopImmediatePropagation();
         setError('Keep this page open until cleanup is confirmed. Retry the same cleanup if interrupted.');

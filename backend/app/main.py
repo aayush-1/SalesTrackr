@@ -49,6 +49,7 @@ from .firestore_storage import FirestoreRepository
 from .manufacturing_api import manufacturing_router
 from .queries import VIEWS, account_matches, account_name_key, matches, query_records
 from .record_cleanup import CleanupWrite, RecordCleanup
+from .shared_backups import ManufacturingRecoveryView, SharedBackupManager
 from .storage import DriveBackend, LocalBackend, Repository, digest
 from .timing import save_timing, timed_lock, timed_phase
 
@@ -58,6 +59,8 @@ STATIC = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 def create_app(settings: Settings | None = None, repository: Repository | None = None):
     settings = settings or Settings.load()
+    if settings.manufacturing_enabled:
+        settings.validate_manufacturing()
     repo = repository or (
         FirestoreRepository(settings)
         if settings.storage_backend == "firestore"
@@ -68,7 +71,13 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         )
     )
     indexed = isinstance(repo, FirestoreRepository)
-    recovery = BackupManager(repo, settings) if indexed else None
+    recovery = (
+        (
+            SharedBackupManager(repo, settings)
+            if settings.manufacturing_enabled else BackupManager(repo, settings)
+        )
+        if indexed else None
+    )
     cleanup = RecordCleanup(repo, recovery) if indexed else None
 
     @asynccontextmanager
@@ -82,7 +91,9 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     app = FastAPI(title="SalesTrackr API", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.repo = repo
     app.state.recovery = recovery
-    app.include_router(manufacturing_router(settings))
+    app.include_router(manufacturing_router(
+        settings, lambda: ManufacturingRecoveryView(recovery),
+    ))
 
     @app.exception_handler(GoogleAPICallError)
     async def database_handler(request, error):
@@ -271,6 +282,7 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 "email": request.state.actor, "mode": settings.mode, "today": today().isoformat(),
                 "storageBackend": "firestore" if indexed else "drive",
                 "generation": repo.generation if indexed else None,
+                "manufacturingEnabled": settings.manufacturing_enabled,
             }
 
     @app.get("/api/status")
@@ -298,7 +310,10 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     @app.get("/api/settings/backup-recovery")
     def recovery_settings(request: Request):
         if recovery:
-            return recovery.status(request.state.actor)
+            return {
+                **recovery.status(request.state.actor),
+                "manufacturingEnabled": settings.manufacturing_enabled,
+            }
         return {
             "mode": settings.mode, "storageBackend": "drive",
             "location": "Current Drive-compatible storage; Firestore migration not activated",
@@ -309,11 +324,15 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             },
             "retention": BACKUP_RETENTION, "backups": [], "lastBackupAt": None, "lastError": None,
             "canBackup": False, "canRestore": False, "generation": None,
+            "manufacturingEnabled": settings.manufacturing_enabled,
         }
 
     @app.post("/api/settings/backup-recovery")
     def recovery_preference(body: BackupPreference, request: Request):
-        return require_recovery().preference(body.weeklyEnabled, request.state.actor)
+        return {
+            **require_recovery().preference(body.weeklyEnabled, request.state.actor),
+            "manufacturingEnabled": settings.manufacturing_enabled,
+        }
 
     @app.get("/api/settings/record-cleanup")
     def cleanup_records(request: Request):

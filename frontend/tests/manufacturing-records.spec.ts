@@ -13,20 +13,20 @@ async function write(request: APIRequestContext, path: string, data: object, bas
   return id;
 }
 async function process(request: APIRequestContext, name: string, linked = true) {
-  const companyId = await write(request, '/partners', { name: `${name} Company` });
-  const personId = await write(request, '/partners', { name: `${name} Specialist`, type: 'individual' });
-  const internalId = await write(request, '/partners', { name: `${name} Workshop`, relationship: 'internal' });
-  const contactId = await write(request, '/contacts', { name: `${name} Contact`, partnerId: companyId });
-  const productId = await write(request, '/products', { name: `${name} Gear`, reference: `${name}-042` });
+  const companyId = await write(request, '/suppliers', { name: `${name} Company` });
+  const personId = await write(request, '/suppliers', { name: `${name} Specialist`, type: 'individual' });
+  const internalId = await write(request, '/suppliers', { name: `${name} Workshop`, relationship: 'internal' });
+  const contactId = await write(request, '/contacts', { name: `${name} Contact`, supplierId: companyId });
+  const productId = await write(request, '/products', { name: `${name} Gear`, partNumber: `${name}-042` });
   const getProduct = async () => await (await request.get(`/api/manufacturing/products/${productId}`)).json() as ManufacturingDetail;
   for (const operationName of ['Raw material', 'Laser cutting', 'Inspection']) {
     const operationId = await write(request, '/operations', { name: `${name} ${operationName}` });
     const product = await getProduct();
     const stepId = await write(request, `/products/${productId}/steps`, { operationId, instructions: `Drawing ${name}: ${operationName}` }, product.entity.version);
     if (linked) {
-      for (const partnerId of [companyId, personId, internalId]) {
+      for (const supplierId of [companyId, personId, internalId]) {
         const step = (await getProduct()).steps.find(s => s.id === stepId)!;
-        await write(request, `/steps/${stepId}/assignments`, { partnerId, contactId: partnerId === companyId ? contactId : null }, step.version);
+        await write(request, `/steps/${stepId}/assignments`, { supplierId, contactId: supplierId === companyId ? contactId : null }, step.version);
       }
     }
   }
@@ -46,9 +46,9 @@ async function action(page: Page, title: string, fill: () => Promise<void> = asy
   await dialog.getByRole('button', { name: title, exact: true }).click();
   await expect(dialog).toHaveCount(0);
 }
-async function assign(page: Page, partnerId: string, contactId?: string) {
+async function assign(page: Page, supplierId: string, contactId?: string) {
   await action(page, 'Assign & start', async () => {
-    await page.getByLabel('Responsible supplier', { exact: true }).selectOption(partnerId);
+    await page.getByLabel('Responsible supplier', { exact: true }).selectOption(supplierId);
     if (contactId) await page.getByLabel('Company contact (optional)', { exact: true }).selectOption(contactId);
   });
   await expect(page.locator('.bt-current-work .bt-record-status')).toHaveText('In progress');
@@ -60,14 +60,14 @@ test('supplier work sheet shows one supplier entry and opens its current manufac
   const waiting = await job(request, source.productId);
   await page.goto(`/manufacturing/records/${id}`);
   await assign(page, source.companyId, source.contactId);
-  const otherProduct = await write(request, '/products', { name: 'SupplierSheet Housing', reference: 'SupplierSheet-043' });
+  const otherProduct = await write(request, '/products', { name: 'SupplierSheet Housing', partNumber: 'SupplierSheet-043' });
   const operationId = (await source.getProduct()).steps[0].operationId;
   const stepId = await write(request, `/products/${otherProduct}/steps`, { operationId }, 1);
-  await write(request, `/steps/${stepId}/assignments`, { partnerId: source.companyId, contactId: source.contactId }, 1);
+  await write(request, `/steps/${stepId}/assignments`, { supplierId: source.companyId, contactId: source.contactId }, 1);
   const otherId = await job(request, otherProduct);
   const other = (await detail(request, otherId)).record;
   await write(request, `/records/${otherId}/assign`, {
-    stepId: other.operations[0].id, partnerId: source.companyId, contactId: source.contactId,
+    stepId: other.operations[0].id, supplierId: source.companyId, contactId: source.contactId,
   }, other.version, otherId);
   await page.goto('/manufacturing');
   const sheet = page.getByRole('region', { name: 'Supplier work in progress', exact: true });
@@ -196,7 +196,7 @@ test('a ready job gains live suppliers and rejects a removed link from an open d
   await expect(page.getByRole('button', { name: 'Assign & start', exact: true })).toBeDisabled();
   await expect(page.locator('.bt-current-work')).toContainText('No suppliers are linked');
   let sourceStep = (await source.getProduct()).steps[0];
-  const linkId = await write(request, `/steps/${sourceStep.id}/assignments`, { partnerId: source.companyId }, sourceStep.version);
+  const linkId = await write(request, `/steps/${sourceStep.id}/assignments`, { supplierId: source.companyId }, sourceStep.version);
   await page.getByRole('button', { name: 'Refresh manufacturing record', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Assign & start', exact: true })).toBeEnabled();
   await page.getByRole('button', { name: 'Assign & start', exact: true }).click();
@@ -209,10 +209,10 @@ test('a ready job gains live suppliers and rejects a removed link from an open d
   page.once('dialog', d => d.accept());
   await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
   sourceStep = (await source.getProduct()).steps[0];
-  await write(request, `/steps/${sourceStep.id}/assignments`, { partnerId: source.personId }, sourceStep.version);
+  await write(request, `/steps/${sourceStep.id}/assignments`, { supplierId: source.personId }, sourceStep.version);
   await page.getByRole('button', { name: 'Refresh manufacturing record', exact: true }).click();
   await assign(page, source.personId);
-  expect((await detail(request, id)).record.currentPartnerId).toBe(source.personId);
+  expect((await detail(request, id)).record.currentSupplierId).toBe(source.personId);
 });
 
 test('lost create, completion and cancellation responses retry exact writes even after refresh', async ({ page, request }) => {

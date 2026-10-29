@@ -1,7 +1,4 @@
 {
   "database": "(default)",
-  "workspace": "producttrackr",
-  "driveRootId": "1CptlMKXkdMOBgdQ-lnAlJA-yG7fSD6L3",
-  "driveSecret": "producttrackr-drive-oauth",
-  "driveSecretVersion": "1"
+  "workspace": "producttrackr"
 }

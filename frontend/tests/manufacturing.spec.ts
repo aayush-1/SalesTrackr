@@ -9,13 +9,21 @@ test.beforeEach(async ({ page }) => {
     backups: [], canBackup: true, canRestore: true, lastBackupAt: null, lastError: null,
     canDelete: true, cleanupInProgress: false, pending: null,
   } }));
+  await page.route('**/api/settings/backup-recovery', route => route.fulfill({ json: {
+    mode: 'demo', storageBackend: 'firestore', generation: 'layout-generation',
+    manufacturingEnabled: true, includesManufacturing: true,
+    schedule: { enabled: false, active: false }, retention: 10, backups: [],
+    canBackup: true, canRestore: true, location: 'Local combined workspace backups',
+  } }));
 });
 
-test('ProductTrackr has separate directories and settings without sales API calls', async ({ page }) => {
+test('ProductTrackr directories stay separate and both apps share Settings', async ({ page }) => {
   const sales: string[] = [], errors: string[] = [];
+  let sharedSettings = false;
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
     if (route.request().url().includes('/api/manufacturing/')) return route.fallback();
+    if (sharedSettings) return route.fallback();
     sales.push(route.request().url()); return route.abort();
   });
   await page.goto('/manufacturing');
@@ -27,21 +35,21 @@ test('ProductTrackr has separate directories and settings without sales API call
     await page.getByRole('navigation', { name: 'Manufacturing navigation' }).getByRole('link', { name: title, exact: true }).click();
     await expect(page.getByRole('heading', { name: title, exact: true })).toBeVisible();
   }
-  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
+  expect(sales).toEqual([]);
+  sharedSettings = true;
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('tab', { name: 'General', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('tab', { name: 'Backup and recovery', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('tab', { name: 'Record cleanup', exact: true })).toHaveCount(1);
-  await expect(page.getByRole('tab', { name: 'Spreadsheet export', exact: true })).toHaveCount(1);
-  await page.getByRole('tab', { name: 'Records & relationships', exact: true }).click();
-  await expect(page.getByRole('tabpanel')).toContainText('exactly one primary');
-  await page.getByRole('tab', { name: 'Data & recovery', exact: true }).click();
+  await expect(page.getByRole('tab')).toHaveCount(5);
+  await expect(page.getByRole('tab', { name: 'Sales record cleanup', exact: true })).toBeVisible();
+  await page.getByRole('tab', { name: 'Backup and recovery', exact: true }).click();
   await page.reload();
-  await expect(page.getByRole('tab', { name: 'Data & recovery', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByRole('tabpanel')).toContainText("SalesTrackr's Drive backups do not include this workspace.");
-  await page.getByRole('tab', { name: 'Record cleanup', exact: true }).click();
+  await expect(page.getByRole('tab', { name: 'Backup and recovery', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel')).toContainText('Both Trackrs are included.');
+  await page.getByRole('tab', { name: 'Manufacturing record cleanup', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Completed record cleanup', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Nothing to clean up', exact: true })).toBeVisible();
-  await page.getByRole('tab', { name: 'Spreadsheet export', exact: true }).click();
+  await page.getByRole('tab', { name: 'Products spreadsheet export', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Directory spreadsheet', exact: true })).toBeVisible();
   await page.goto('/manufacturing/records');
   await expect(page).toHaveURL(/\/manufacturing\/records$/);
@@ -57,10 +65,17 @@ test('production ProductTrackr shows cloud storage without a local-preview banne
   await page.route('**/api/manufacturing/meta', route => route.fulfill({ json: {
     workspaceId: 'producttrackr', generation: 'production-generation', mode: 'production', storageBackend: 'firestore',
   } }));
+  await page.route('**/api/settings/backup-recovery', route => route.fulfill({ json: {
+    mode: 'production', storageBackend: 'firestore', generation: 'production-generation',
+    manufacturingEnabled: true, includesManufacturing: true,
+    schedule: { enabled: false, active: false }, retention: 10, backups: [],
+    canBackup: true, canRestore: true, location: 'SalesTrackr / Backups in private Google Drive',
+  } }));
   await page.goto('/manufacturing/settings');
-  await expect(page.getByRole('heading', { name: 'ProductTrackr settings', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/settings\?tab=general$/);
   await expect(page.locator('.unit-preview-notice')).toHaveCount(0);
-  await expect(page.getByRole('tabpanel')).toContainText('Cloud Firestore');
+  await expect(page.getByRole('tabpanel')).toContainText('Your records are saved online.');
   await expect(page.getByRole('tabpanel')).not.toContainText('Local Firestore emulator');
 });
 
@@ -81,15 +96,15 @@ test('workspace switcher changes the entire space and leaves sales settings inta
   await page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^ProductTrackr/ }).click();
   await expect(trigger).toContainText('ProductTrackr');
   await expect(page.getByRole('link', { name: 'All sales records', exact: true })).toHaveCount(0);
-  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'ProductTrackr settings', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   await trigger.click();
   await page.getByRole('group', { name: 'Available workspaces' }).getByRole('link', { name: /^SalesTrackr/ }).click();
   await expect(page.getByRole('heading', { name: 'A clear view of your sales.', exact: true })).toBeVisible();
   await expect(page.locator('.topbar,.breadcrumb')).toHaveCount(0);
   await expect(page.locator('footer').getByRole('button', { name: 'Refresh data', exact: true })).toBeAttached();
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
-  await expect(page.getByRole('tab', { name: 'Backup and recovery', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'General', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
 
 test('workspace switching honours the sales unsaved-changes warning', async ({ page }) => {
@@ -123,8 +138,8 @@ test('manufacturing navigation and settings fit mobile and narrow desktop screen
   await expect(page.getByRole('heading', { name: 'Products', exact: true })).toBeVisible();
   await expect(page.locator('.sidebar')).not.toHaveClass(/open/);
   await page.getByRole('button', { name: 'Open navigation', exact: true }).click();
-  await page.getByRole('link', { name: 'ProductTrackr settings', exact: true }).click();
-  await page.getByRole('tab', { name: 'Data & recovery', exact: true }).click();
+  await page.getByRole('link', { name: 'Settings', exact: true }).click();
+  await page.getByRole('tab', { name: 'Backup and recovery', exact: true }).click();
   await expect(page.getByRole('tabpanel')).toContainText('Local simulation only.');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Open navigation', exact: true }).click();

@@ -1,4 +1,5 @@
 import secrets
+import time
 from copy import copy
 from threading import RLock
 from uuid import uuid4
@@ -8,6 +9,7 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import firestore
 
 from .domain import Problem, now
+from .manufacturing_compat import LEGACY_COLLECTIONS, canonical_counts, canonical_data
 from .manufacturing_domain import (
     MODELS,
     Assignment,
@@ -36,14 +38,14 @@ class ManufacturingRepository:
         self.workspace = self.client.collection("workspaces").document(settings.manufacturing_workspace)
         self.product_folder_context = {
             "identity": settings.manufacturing_identity(self.workspace.id),
-            "rootId": settings.manufacturing_backup_folder_id,
+            "rootId": settings.root_id,
         }
         self.lock = RLock()
         self.signing_key = secrets.token_bytes(32)
         try:
             self.workspace.create({
                 "generation": uuid4().hex, "version": 0, "sequence": 0,
-                "activeDataset": "legacy", "productSearchVersion": 1,
+                "activeDataset": "legacy", "productSearchVersion": 1, "namingVersion": 1,
             })
         except AlreadyExists:
             @firestore.transactional
@@ -56,7 +58,68 @@ class ManufacturingRepository:
 
             initialize(self.client.transaction())
         self.sync()
+        self.migrate_legacy_naming()
         self.index_legacy_products()
+
+    def migrate_legacy_naming(self):
+        for _ in range(3):
+            self.sync()
+            before = self.control.copy()
+            if before.get("namingVersion") == 1:
+                return
+            maintenance = before.get("maintenance") or {}
+            if (
+                maintenance and maintenance.get("expires", float("inf")) > time.time()
+                or before.get("pendingRecordCleanup")
+                or (before.get("backupLease") or {}).get("expires", 0) > time.time()
+            ):
+                raise Problem(
+                    "Finish workspace maintenance before updating ProductTrackr.", 503, "maintenance",
+                )
+            data = self.export_at(self.dataset, {"weeklyEnabled": before.get("weeklyEnabled", True)})
+            data["productFolders"] = self.product_folders(data["products"])
+            if before.get("productSearchVersion") != 1:
+                for product in data["products"].values():
+                    product["searchChars"] = self.product_search_chars(product)
+            target, statistics = self.stage(data)
+
+            @firestore.transactional
+            def activate(transaction):
+                control = self.workspace.get(transaction=transaction).to_dict()
+                maintenance = control.get("maintenance") or {}
+                if (
+                    any(control[key] != before[key] for key in ("generation", "sequence", "activeDataset"))
+                    or control.get("namingVersion") == 1
+                    or maintenance and maintenance.get("expires", float("inf")) > time.time()
+                    or control.get("pendingRecordCleanup")
+                    or (control.get("backupLease") or {}).get("expires", 0) > time.time()
+                ):
+                    return False
+                old = self.workspace.collection("datasets").document(control["activeDataset"])
+                transaction.set(old, {
+                    "state": "archived", "archivedAt": now(), "namingVersion": 0,
+                    "migration": "supplier-naming",
+                }, merge=True)
+                transaction.update(target, {"state": "active", "activatedAt": now()})
+                spreadsheet = control.get("directorySpreadsheet")
+                if spreadsheet and spreadsheet.get("result"):
+                    spreadsheet = {
+                        **spreadsheet, "result": {
+                            **spreadsheet["result"],
+                            "counts": canonical_counts(spreadsheet["result"]["counts"]),
+                        },
+                    }
+                transaction.set(self.workspace, {
+                    **control, **statistics, "activeDataset": target.id, "generation": target.id,
+                    "sequence": control["sequence"] + 1, "maintenance": None,
+                    **({"directorySpreadsheet": spreadsheet} if spreadsheet is not None else {}),
+                })
+                return True
+
+            if activate(self.client.transaction()):
+                self.sync()
+                return
+        raise Problem("ProductTrackr changed while updating. Retry shortly.", 503, "workspace_changed")
 
     def sync(self):
         self.control = self.workspace.get().to_dict()
@@ -79,7 +142,7 @@ class ManufacturingRepository:
 
     @staticmethod
     def product_search_chars(data):
-        return sorted(set(f"{data['name']} {data.get('reference', '')}".casefold()))
+        return sorted(set(f"{data['name']} {data.get('partNumber', '')}".casefold()))
 
     def index_legacy_products(self):
         if self.workspace.get().to_dict().get("productSearchVersion") == 1:
@@ -152,21 +215,32 @@ class ManufacturingRepository:
         from .manufacturing_backups import FILES, RESERVED
         from .storage import encode
 
-        allowed = set(FILES) | (RESERVED if target.path == self.workspace.path else {"productFolders"})
+        root = target.path == self.workspace.path
+        control = self.workspace.get().to_dict()
+        descriptor = (
+            self.workspace.collection("datasets").document("legacy").get().to_dict()
+            if root and control["activeDataset"] != "legacy"
+            else control if root else target.get().to_dict()
+        ) or {}
+        legacy = descriptor.get("namingVersion") != 1
+        collections = {
+            LEGACY_COLLECTIONS.get(kind, kind) if legacy else kind: kind for kind in FILES
+        }
+        allowed = set(collections) | (RESERVED if root else {"productFolders"})
         if any(collection.id not in allowed for collection in target.collections()):
             raise Problem(
                 "An unknown ProductTrackr collection cannot be omitted from a backup.", 409, "backup_schema",
             )
         data, size = {"settings": preferences}, 0
-        for kind in FILES:
+        for stored_kind, kind in collections.items():
             data[kind] = {}
-            for snapshot in target.collection(kind).stream():
+            for snapshot in target.collection(stored_kind).stream():
                 value = snapshot.to_dict()
                 size += len(encode(value)) + len(snapshot.id)
                 if size > MAX_EXPANDED:
                     raise Problem("ProductTrackr data exceeds the 256 MiB backup limit.", 413, "backup_size")
                 data[kind][snapshot.id] = value
-        return data
+        return canonical_data(data) if legacy else data
 
     def restored_product_folder(self, product_id):
         if self.control["activeDataset"] == "legacy":
@@ -224,7 +298,7 @@ class ManufacturingRepository:
         target = self.workspace.collection("datasets").document(uuid4().hex)
         folder_data = data.get("productFolders")
         target.set({
-            "state": "staging", "createdAt": now(),
+            "state": "staging", "createdAt": now(), "namingVersion": 1,
             **({"productFolders": {
                 key: value for key, value in folder_data.items() if key != "folders"
             }} if folder_data is not None else {}),
@@ -261,15 +335,15 @@ class ManufacturingRepository:
         target.update({"state": "verified", "dataHash": digest(actual)})
         return target, {
             "version": self.workspace.get().to_dict()["version"] + 1,
-            "productSearchVersion": 1, **data["settings"],
+            "productSearchVersion": 1, "namingVersion": 1, **data["settings"],
         }
 
-    def list(self, kind, search="", partner_id=None, offset=0, limit=100):
+    def list(self, kind, search="", supplier_id=None, offset=0, limit=100):
         from google.cloud.firestore_v1.base_query import FieldFilter
 
         query = self.collection(kind)
-        if partner_id:
-            query = query.where(filter=FieldFilter("partnerId", "==", partner_id))
+        if supplier_id:
+            query = query.where(filter=FieldFilter("supplierId", "==", supplier_id))
         prefix = search.strip().casefold()
         if prefix and kind == "products":
             query = query.where(filter=FieldFilter("searchChars", "array_contains", prefix[0]))
@@ -277,7 +351,7 @@ class ManufacturingRepository:
             rows = (snapshot.to_dict() for snapshot in ordered.stream())
             matches = [
                 row for row in rows
-                if any(prefix in row.get(field, "").casefold() for field in ("name", "reference"))
+                if any(prefix in row.get(field, "").casefold() for field in ("name", "partNumber"))
             ]
             return {"items": matches[offset:offset + limit], "total": len(matches), **self.meta()}
         if prefix:
@@ -303,7 +377,7 @@ class ManufacturingRepository:
             before = self.workspace.get().to_dict()
             entity = self.read(kind, entity_id)
             result = {
-                "entity": entity, "products": [], "operations": [], "partners": [],
+                "entity": entity, "products": [], "operations": [], "suppliers": [],
                 "contacts": [], "steps": [], "assignments": [],
             }
             if kind == "products":
@@ -316,21 +390,23 @@ class ManufacturingRepository:
                 result["steps"] = self.query("steps", "operationId", entity_id)
                 result["operations"] = [entity]
             else:
-                field = "partnerId" if kind == "partners" else "contactId"
+                field = "supplierId" if kind == "suppliers" else "contactId"
                 result["assignments"] = self.query("assignments", field, entity_id)
                 result["steps"] = self.batch("steps", [a["stepId"] for a in result["assignments"]])
-                if kind == "partners":
-                    result["partners"] = [entity]
-                    result["contacts"] = self.query("contacts", "partnerId", entity_id)
+                if kind == "suppliers":
+                    result["suppliers"] = [entity]
+                    result["contacts"] = self.query("contacts", "supplierId", entity_id)
                 else:
                     result["contacts"] = [entity]
-                    result["partners"] = [self.read("partners", entity["partnerId"])]
+                    result["suppliers"] = [self.read("suppliers", entity["supplierId"])]
             if kind != "products":
                 result["products"] = self.batch("products", [s["productId"] for s in result["steps"]])
             if kind != "operations":
                 result["operations"] = self.batch("operations", [s["operationId"] for s in result["steps"]])
             if kind == "products":
-                result["partners"] = self.batch("partners", [a["partnerId"] for a in result["assignments"]])
+                result["suppliers"] = self.batch(
+                    "suppliers", [a["supplierId"] for a in result["assignments"]],
+                )
                 result["contacts"] = self.batch(
                     "contacts", [a["contactId"] for a in result["assignments"] if a["contactId"]],
                 )
@@ -416,13 +492,13 @@ class ManufacturingRepository:
             if verb == "edit" and not old:
                 raise Problem("Manufacturing record not found.", 404, "not_found")
             self.check(old, body.baseVersion)
-            if kind == "partners" and old and old["type"] != fields["type"]:
+            if kind == "suppliers" and old and old["type"] != fields["type"]:
                 raise Problem("Supplier type cannot change; its company contacts must stay valid.")
             if kind == "contacts":
-                partner = self.read("partners", fields["partnerId"], tx)
-                if partner["type"] != "company":
+                supplier = self.read("suppliers", fields["supplierId"], tx)
+                if supplier["type"] != "company":
                     raise Problem("Contacts belong to company suppliers, not independent people.")
-                if old and old["partnerId"] != fields["partnerId"]:
+                if old and old["supplierId"] != fields["supplierId"]:
                     raise Problem("Moving a contact between companies is not supported.")
             if kind == "products" and not old:
                 fields["stepIds"] = []
@@ -464,19 +540,19 @@ class ManufacturingRepository:
         primary = step["primaryAssignmentId"]
         if action in ("assign", "edit-assignment"):
             fields = Assignment.model_validate(body.data).model_dump()
-            partner = self.read("partners", fields["partnerId"], tx)
+            supplier = self.read("suppliers", fields["supplierId"], tx)
             if fields["contactId"]:
                 contact = self.read("contacts", fields["contactId"], tx)
-                if partner["type"] != "company" or contact["partnerId"] != partner["id"]:
+                if supplier["type"] != "company" or contact["supplierId"] != supplier["id"]:
                     raise Problem("Choose a contact belonging to this company supplier.")
             old = by_id.get(body.id)
             if action == "edit-assignment" and not old:
                 raise Problem("Assignment not found.", 404, "not_found")
             if action == "assign" and self.ref("assignments", body.id).get(transaction=tx).exists:
                 raise Problem("Assignment ID is already in use.", 409, "record_exists")
-            if old and old["partnerId"] != fields["partnerId"]:
+            if old and old["supplierId"] != fields["supplierId"]:
                 raise Problem("Remove the existing assignment before choosing a different supplier.")
-            if any(a["partnerId"] == fields["partnerId"] and a["id"] != body.id for a in assignments):
+            if any(a["supplierId"] == fields["supplierId"] and a["id"] != body.id for a in assignments):
                 raise Problem(
                     "This supplier is already assigned to this product operation.", 409, "duplicate",
                 )

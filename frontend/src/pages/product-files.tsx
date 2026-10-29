@@ -36,8 +36,8 @@ export function ProductFiles({ productId }: { productId: string }) {
       {error && <button className="button" disabled={workspaceChanged} onClick={() => setAttempt(v => v + 1)}><RefreshCw size={16} />Retry folder connection</button>}
     </div>
     {error ? <Alert>{error}</Alert> : !folder ? <p>Connecting this product's Drive folder...</p>
-      : folder.configured ? <p>Add drawings, specifications and other files directly in this product's folder under ProductTrackr / Products. Its name updates with the product name and part number; its folder ID, link and files stay the same.</p>
-        : <p>Connect the private ProductTrackr Drive folder and the owner's Drive credentials to enable a folder for this product.</p>}
+      : folder.configured ? <p>Add drawings, specifications and other files directly in this product's folder under SalesTrackr / Products. Its name updates with the product name and part number; its folder ID, link and files stay the same.</p>
+        : <p>Google Drive is not connected for this workspace.</p>}
     <p className="muted">Files stay in Google Drive. Workspace ZIP backups contain records, not drawings or uploaded files; restoring or cleaning up jobs does not delete these files. Existing Drive permissions apply.</p>
   </section>;
 }

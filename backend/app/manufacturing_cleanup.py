@@ -8,7 +8,6 @@ from google.cloud import firestore
 from pydantic import Field, model_validator
 
 from .domain import Identifier, Model, Problem, now
-from .manufacturing_backups import ManufacturingBackupManager
 from .manufacturing_records import ManufacturingRecords
 from .manufacturing_storage import deleted_record_receipt
 from .storage import digest
@@ -309,12 +308,11 @@ class ManufacturingCleanup:
         release(self.repo.client.transaction())
 
 
-def manufacturing_cleanup_router(repository, settings):
+def manufacturing_cleanup_router(repository, shared_recovery):
     router = APIRouter(prefix="/settings/record-cleanup")
 
     def service():
-        repo = repository()
-        return ManufacturingCleanup(repo, ManufacturingBackupManager(repo, settings))
+        return ManufacturingCleanup(repository(), shared_recovery())
 
     @router.get("")
     def listing(request: Request, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=50)):

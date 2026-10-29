@@ -18,6 +18,8 @@ def app(tmp_path):
         pytest.skip("Requires the explicitly configured local Firestore emulator.")
     settings = Settings(
         "demo", tmp_path, "", "", "", "", False,
+        storage_backend="firestore", firestore_project="demo-producttrackr-tests",
+        firestore_workspace=f"sales-{uuid4().hex}",
         manufacturing_enabled=True, manufacturing_project="demo-producttrackr-tests",
         manufacturing_workspace=uuid4().hex,
     )
@@ -59,7 +61,7 @@ def step(client, product, operation):
 
 def test_directories_retry_versions_and_restart(app):
     client, settings = app
-    response, body = command(client, "/products", {"name": "Gear", "reference": "G-1"})
+    response, body = command(client, "/products", {"name": "Gear", "partNumber": "G-1"})
     assert response.status_code == 200
     assert command(client, "/products", {}, body=body)[0].json() == response.json()
     product = client.get(f"/api/manufacturing/products/{body['id']}").json()["entity"]
@@ -83,11 +85,11 @@ def test_directories_retry_versions_and_restart(app):
         assert restored["generation"] == client.get("/api/manufacturing/meta").json()["generation"]
 
 
-def test_product_search_matches_name_and_product_id_once_with_pagination(app):
+def test_product_search_matches_name_and_part_number_once_with_pagination(app):
     client, _ = app
-    gear = create(client, "products", name="Spur Gear", reference="SG-042")
-    housing = create(client, "products", name="SG-042 Housing", reference="sg-043")
-    create(client, "products", name="Unrelated", notes="SG-042", reference="")
+    gear = create(client, "products", name="Spur Gear", partNumber="SG-042")
+    housing = create(client, "products", name="SG-042 Housing", partNumber="sg-043")
+    create(client, "products", name="Unrelated", notes="SG-042", partNumber="")
     for search, expected in [
         ("gEaR", {gear["id"]}), (" SG-042 ", {gear["id"], housing["id"]}),
         ("g-04", {gear["id"], housing["id"]}), ("043", {housing["id"]}),
@@ -105,7 +107,7 @@ def test_product_search_matches_name_and_product_id_once_with_pagination(app):
     assert [page["total"] for page in pages] == [2, 2, 2]
     assert [row["id"] for page in pages for row in page["items"]] == [housing["id"], gear["id"]]
     edited, _ = command(
-        client, f"/products/{gear['id']}", {"name": gear["name"], "reference": "GX-975"},
+        client, f"/products/{gear['id']}", {"name": gear["name"], "partNumber": "GX-975"},
         gear["version"], gear["id"], "PUT",
     )
     assert edited.status_code == 200
@@ -113,7 +115,7 @@ def test_product_search_matches_name_and_product_id_once_with_pagination(app):
     assert client.get("/api/manufacturing/products?search=sg-042").json()["total"] == 1
     updated = detail(client, gear)["entity"]
     assert command(
-        client, f"/products/{gear['id']}", {"name": gear["name"], "reference": ""},
+        client, f"/products/{gear['id']}", {"name": gear["name"], "partNumber": ""},
         updated["version"], gear["id"], "PUT",
     )[0].status_code == 200
     assert client.get("/api/manufacturing/products?search=gx-975").json()["total"] == 0
@@ -122,7 +124,7 @@ def test_product_search_matches_name_and_product_id_once_with_pagination(app):
 
 def test_legacy_product_search_index_preserves_product_values_versions_and_step_links(app):
     client, settings = app
-    gear = create(client, "products", name="Legacy Gear", reference="LEG-042")
+    gear = create(client, "products", name="Legacy Gear", partNumber="LEG-042")
     operation = create(client, "operations", name="Cut")
     step(client, gear, operation)
     repo = ManufacturingRepository(settings)
@@ -145,18 +147,18 @@ def test_product_scoped_assignments_primary_contact_validation_and_retry(app):
     bracket = create(client, "products", name="Bracket")
     laser = create(client, "operations", name="Laser cutting")
     first, second = step(client, gear, laser), step(client, bracket, laser)
-    a = create(client, "partners", name="Company A")
-    b = create(client, "partners", name="Company B")
-    contact = create(client, "contacts", name="A contact", partnerId=a["id"])
-    wrong = create(client, "contacts", name="B contact", partnerId=b["id"])
+    a = create(client, "suppliers", name="Company A")
+    b = create(client, "suppliers", name="Company B")
+    contact = create(client, "contacts", name="A contact", supplierId=a["id"])
+    wrong = create(client, "contacts", name="B contact", supplierId=b["id"])
     bad, _ = command(
         client, f"/steps/{first['id']}/assignments",
-        {"partnerId": a["id"], "contactId": wrong["id"]}, first["version"],
+        {"supplierId": a["id"], "contactId": wrong["id"]}, first["version"],
     )
     assert bad.status_code == 422
     assigned, assignment = command(
         client, f"/steps/{first['id']}/assignments",
-        {"partnerId": a["id"], "contactId": contact["id"]}, first["version"],
+        {"supplierId": a["id"], "contactId": contact["id"]}, first["version"],
     )
     assert assigned.status_code == 200
     view = detail(client, gear)
@@ -165,11 +167,11 @@ def test_product_scoped_assignments_primary_contact_validation_and_retry(app):
     assert detail(client, bracket)["steps"][0]["primaryAssignmentId"] is None
     assert detail(client, bracket)["assignments"] == []
     duplicate, _ = command(
-        client, f"/steps/{first['id']}/assignments", {"partnerId": a["id"]}, first["version"],
+        client, f"/steps/{first['id']}/assignments", {"supplierId": a["id"]}, first["version"],
     )
     assert duplicate.status_code == 409
     added, other = command(
-        client, f"/steps/{first['id']}/assignments", {"partnerId": b["id"]}, first["version"],
+        client, f"/steps/{first['id']}/assignments", {"supplierId": b["id"]}, first["version"],
     )
     assert added.status_code == 200
     first = detail(client, gear)["steps"][0]
@@ -197,7 +199,7 @@ def test_product_scoped_assignments_primary_contact_validation_and_retry(app):
         client, f"/steps/{first['id']}/assignments/{other['id']}/remove", {}, first["version"], other["id"],
     )[0].status_code == 200
     assert detail(client, gear)["steps"][0]["primaryAssignmentId"] is None
-    assert client.get(f"/api/manufacturing/partners/{a['id']}").json()["contacts"][0]["id"] == contact["id"]
+    assert client.get(f"/api/manufacturing/suppliers/{a['id']}").json()["contacts"][0]["id"] == contact["id"]
 
 
 def test_people_internal_contacts_reverse_links_and_reorder(app):
@@ -205,19 +207,19 @@ def test_people_internal_contacts_reverse_links_and_reorder(app):
     product = create(client, "products", name="Gear")
     operation = create(client, "operations", name="Inspection")
     first, second = step(client, product, operation), step(client, product, operation)
-    person = create(client, "partners", name="Independent specialist", type="individual")
-    internal = create(client, "partners", name="Our company", relationship="internal")
-    contact = create(client, "contacts", name="Inspector", partnerId=internal["id"])
+    person = create(client, "suppliers", name="Independent specialist", type="individual")
+    internal = create(client, "suppliers", name="Our company", relationship="internal")
+    contact = create(client, "contacts", name="Inspector", supplierId=internal["id"])
     assert command(
-        client, "/contacts", {"name": "Duplicate person", "partnerId": person["id"]},
+        client, "/contacts", {"name": "Duplicate person", "supplierId": person["id"]},
     )[0].status_code == 422
     response, assignment = command(
         client, f"/steps/{first['id']}/assignments",
-        {"partnerId": internal["id"], "contactId": contact["id"]}, first["version"],
+        {"supplierId": internal["id"], "contactId": contact["id"]}, first["version"],
     )
     assert response.status_code == 200
     assert command(
-        client, f"/steps/{second['id']}/assignments", {"partnerId": person["id"]}, second["version"],
+        client, f"/steps/{second['id']}/assignments", {"supplierId": person["id"]}, second["version"],
     )[0].status_code == 200
     view = detail(client, product)
     order = [second["id"], first["id"]]
@@ -251,7 +253,7 @@ def test_workspace_fence_and_no_sales_data_reuse(app):
     ]:
         assert command(client, "/products", {"name": "Blocked"}, headers=headers)[0].status_code == 409
     assert client.get("/api/manufacturing/products").json()["total"] == 0
-    create(client, "partners", name="Manufacturing only")
+    create(client, "suppliers", name="Manufacturing only")
     assert client.get("/api/accounts").json()["total"] == 0
     with pytest.raises(RuntimeError):
         ManufacturingRepository(replace(settings, mode="production"))
@@ -264,13 +266,13 @@ def test_concurrent_assignments_preserve_one_primary(app):
     product = create(client, "products", name="Gear")
     operation = create(client, "operations", name="Cut")
     current = step(client, product, operation)
-    partners = [create(client, "partners", name=f"Company {n}") for n in range(2)]
+    suppliers = [create(client, "suppliers", name=f"Company {n}") for n in range(2)]
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(
             lambda p: command(
-                client, f"/steps/{current['id']}/assignments", {"partnerId": p["id"]}, current["version"],
+                client, f"/steps/{current['id']}/assignments", {"supplierId": p["id"]}, current["version"],
             )[0].status_code,
-            partners,
+            suppliers,
         ))
     assert sorted(results) == [200, 409]
     view = detail(client, product)
@@ -280,22 +282,22 @@ def test_concurrent_assignments_preserve_one_primary(app):
 
 def test_edits_preserve_relationships_and_reject_foreign_references(app):
     client, settings = app
-    company = create(client, "partners", name="Company")
-    another = create(client, "partners", name="Another company")
-    contact = create(client, "contacts", name="First contact", partnerId=company["id"])
-    second_contact = create(client, "contacts", name="Second contact", partnerId=company["id"])
+    company = create(client, "suppliers", name="Company")
+    another = create(client, "suppliers", name="Another company")
+    contact = create(client, "contacts", name="First contact", supplierId=company["id"])
+    second_contact = create(client, "contacts", name="Second contact", supplierId=company["id"])
     product = create(client, "products", name="Gear")
     operation = create(client, "operations", name="Cut")
     current = step(client, product, operation)
     added, assignment = command(
         client, f"/steps/{current['id']}/assignments",
-        {"partnerId": company["id"], "contactId": contact["id"]}, current["version"],
+        {"supplierId": company["id"], "contactId": contact["id"]}, current["version"],
     )
     assert added.status_code == 200
     current = detail(client, product)["steps"][0]
     changed, _ = command(
         client, f"/steps/{current['id']}/assignments/{assignment['id']}",
-        {"partnerId": company["id"], "contactId": second_contact["id"], "notes": "New contact"},
+        {"supplierId": company["id"], "contactId": second_contact["id"], "notes": "New contact"},
         current["version"], assignment["id"], "PUT",
     )
     assert changed.status_code == 200
@@ -303,11 +305,11 @@ def test_edits_preserve_relationships_and_reject_foreign_references(app):
     assert view["steps"][0]["primaryAssignmentId"] == assignment["id"]
     assert view["assignments"][0]["contactId"] == second_contact["id"]
     assert command(
-        client, f"/contacts/{contact['id']}", {"name": "Moved", "partnerId": another["id"]},
+        client, f"/contacts/{contact['id']}", {"name": "Moved", "supplierId": another["id"]},
         contact["version"], contact["id"], "PUT",
     )[0].status_code == 422
     assert command(
-        client, f"/partners/{company['id']}", {"name": "Changed", "type": "individual"},
+        client, f"/suppliers/{company['id']}", {"name": "Changed", "type": "individual"},
         company["version"], company["id"], "PUT",
     )[0].status_code == 422
     assert command(

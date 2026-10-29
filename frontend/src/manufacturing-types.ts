@@ -1,39 +1,39 @@
-export type Directory = 'products' | 'operations' | 'partners' | 'contacts';
+export type Directory = 'products' | 'operations' | 'suppliers' | 'contacts';
 export interface ManufacturingMeta {
   workspaceId: string; generation: string; mode: 'demo' | 'production'; storageBackend: 'firestore';
 }
 export interface ManufacturingEntity {
   id: string; version: number; name: string; createdAt: string; updatedAt: string; updatedBy: string;
 }
-export interface Product extends ManufacturingEntity { reference: string; notes: string; stepIds: string[] }
+export interface Product extends ManufacturingEntity { partNumber: string; notes: string; stepIds: string[] }
 export interface Operation extends ManufacturingEntity { description: string }
-export interface Partner extends ManufacturingEntity {
+export interface Supplier extends ManufacturingEntity {
   type: 'company' | 'individual'; relationship: 'external' | 'internal';
   address: string; email: string; phone: string; notes: string;
 }
 export interface CompanyContact extends ManufacturingEntity {
-  partnerId: string; designation: string; email: string; phone: string;
+  supplierId: string; designation: string; email: string; phone: string;
 }
 export interface ProductOperation {
   id: string; version: number; productId: string; operationId: string; instructions: string;
   primaryAssignmentId: string | null;
 }
-export interface PartnerAssignment {
-  id: string; version: number; productId: string; stepId: string; partnerId: string;
+export interface SupplierAssignment {
+  id: string; version: number; productId: string; stepId: string; supplierId: string;
   contactId: string | null; notes: string;
 }
-export type Master = Product | Operation | Partner | CompanyContact;
+export type Master = Product | Operation | Supplier | CompanyContact;
 export interface ManufacturingPage extends ManufacturingMeta { items: Master[]; total: number }
 export interface ManufacturingDetail extends ManufacturingMeta {
-  entity: Master; products: Product[]; operations: Operation[]; partners: Partner[];
-  contacts: CompanyContact[]; steps: ProductOperation[]; assignments: PartnerAssignment[];
+  entity: Master; products: Product[]; operations: Operation[]; suppliers: Supplier[];
+  contacts: CompanyContact[]; steps: ProductOperation[]; assignments: SupplierAssignment[];
 }
 
 export type ManufacturingRecordStatus = 'ready' | 'in_progress' | 'completed' | 'cancelled';
 export type ManufacturingRecordView = ManufacturingRecordStatus | 'active' | 'all';
 export type ManufacturingRecordAction = 'assign' | 'complete' | 'reassign' | 'undo' | 'cancel';
 export interface WorkAssignment {
-  partnerId: string; partnerName: string; type: Partner['type']; relationship: Partner['relationship'];
+  supplierId: string; supplierName: string; type: Supplier['type']; relationship: Supplier['relationship'];
   email: string; phone: string; contact: Pick<CompanyContact, 'id' | 'name' | 'designation' | 'email' | 'phone'> | null;
 }
 export interface CopiedOperation {
@@ -45,25 +45,25 @@ export interface ManufacturingWorkStep extends CopiedOperation {
   assignmentNote: string; completionNote: string;
 }
 export interface ManufacturingRecordSummary {
-  id: string; version: number; number: string; productId: string; productName: string; productReference: string;
+  id: string; version: number; number: string; productId: string; productName: string; productPartNumber: string;
   notes: string; status: ManufacturingRecordStatus; active: boolean; completedCount: number; stepCount: number;
   currentOperationId: string | null; currentOperationName: string | null;
-  currentPartnerId: string | null; currentPartnerName: string | null; currentContactName: string | null;
+  currentSupplierId: string | null; currentSupplierName: string | null; currentContactName: string | null;
   startedOn: string | null; completedOn: string | null; createdAt: string; updatedAt: string;
 }
 export interface ManufacturingRecord extends ManufacturingRecordSummary {
   operations: ManufacturingWorkStep[]; currentIndex: number | null; updatedBy: string;
   cancelledAt: string | null; cancelReason: string;
 }
-export interface EligibleManufacturingPartner {
-  partner: Partner; suggestedContactId: string | null; primary: boolean;
+export interface EligibleManufacturingSupplier {
+  supplier: Supplier; suggestedContactId: string | null; primary: boolean;
 }
 export interface ManufacturingRecordDetail extends ManufacturingMeta {
-  record: ManufacturingRecord; eligiblePartners: EligibleManufacturingPartner[];
+  record: ManufacturingRecord; eligibleSuppliers: EligibleManufacturingSupplier[];
   eligibilityError: string; today: string;
 }
 export interface ManufacturingRecordPreview extends ManufacturingMeta {
-  process: { productId: string; productName: string; productReference: string; operations: CopiedOperation[] };
+  process: { productId: string; productName: string; productPartNumber: string; operations: CopiedOperation[] };
   sourceToken: string; suggestions: Record<string, string[]>; today: string;
 }
 export interface ManufacturingRecordPage extends ManufacturingMeta { items: ManufacturingRecordSummary[]; total: number }

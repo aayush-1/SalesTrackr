@@ -12,7 +12,7 @@ from .manufacturing_spreadsheet import manufacturing_spreadsheet_router
 from .manufacturing_storage import ManufacturingRepository
 
 
-def manufacturing_router(settings):
+def manufacturing_router(settings, shared_recovery):
     router = APIRouter(prefix="/api/manufacturing")
     repository = None
     lock = Lock()
@@ -47,8 +47,8 @@ def manufacturing_router(settings):
         return result
 
     router.include_router(manufacturing_records_router(repo))
-    router.include_router(manufacturing_recovery_router(repo, settings))
-    router.include_router(manufacturing_cleanup_router(repo, settings))
+    router.include_router(manufacturing_recovery_router())
+    router.include_router(manufacturing_cleanup_router(repo, shared_recovery))
     router.include_router(manufacturing_spreadsheet_router(repo, settings))
     router.include_router(manufacturing_files_router(repo, settings))
 
@@ -58,12 +58,12 @@ def manufacturing_router(settings):
 
     @router.get("/{kind}")
     def listing(
-        kind: Directory, search: str = Query("", max_length=200), partnerId: Identifier | None = None,
+        kind: Directory, search: str = Query("", max_length=200), supplierId: Identifier | None = None,
         offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200),
     ):
-        if partnerId and kind != "contacts":
+        if supplierId and kind != "contacts":
             raise Problem("The supplier filter is only supported for contacts.")
-        return repo().list(kind, search, partnerId, offset, limit)
+        return repo().list(kind, search, supplierId, offset, limit)
 
     @router.get("/{kind}/{entity_id}")
     def detail(kind: Directory, entity_id: Identifier):

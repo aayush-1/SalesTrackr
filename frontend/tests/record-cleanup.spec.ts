@@ -43,7 +43,7 @@ test('cleanup selects only finished records, confirms deletion, retries a lost r
   const retained = await Promise.all([active, awaiting].map(async row =>
     (await page.request.get(`/api/records/${row.entityId}/detail`)).json()));
   await page.goto('/settings?tab=cleanup');
-  await expect(page.getByRole('tab', { name: 'Record cleanup', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: 'Sales record cleanup', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('Closed + feedback received', { exact: true })).toBeVisible();
   await expect(page.getByText('Browser cleanup sample: active', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Browser cleanup sample: closed', { exact: true })).toHaveCount(0);

@@ -13,7 +13,9 @@ export default defineConfig({
     command: `${python} -m uvicorn backend.app.main:create_app --factory --host 127.0.0.1 --port 8014`,
     cwd: root, url: 'http://127.0.0.1:8014/healthz', reuseExistingServer: false,
     env: {
-      APP_MODE: 'demo', STORAGE_BACKEND: 'drive', DEMO_SEED: 'false',
+      APP_MODE: 'demo', STORAGE_BACKEND: 'firestore', DEMO_SEED: 'false',
+      FIRESTORE_PROJECT_ID: 'demo-producttrackr-browser',
+      FIRESTORE_WORKSPACE_ID: `sales-${workspace}`, GOOGLE_FOLDER_ID: 'shared-local-root',
       DEMO_DATA_DIR: path.join('.local-data', 'browser-manufacturing', workspace),
       PRODUCTTRACKR_ENABLED: 'true', PRODUCTTRACKR_FIRESTORE_PROJECT_ID: 'demo-producttrackr-browser',
       PRODUCTTRACKR_WORKSPACE_ID: workspace, FIRESTORE_EMULATOR_HOST: '127.0.0.1:8085',

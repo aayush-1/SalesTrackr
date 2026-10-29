@@ -19,14 +19,15 @@ async function open(page: Page) {
 }
 
 test('one-click export updates the same downloadable workbook and leaves directories and sales unchanged', async ({ page, request }) => {
-  const productId = await create(request, 'products', { name: `Export ${identifier()}`, reference: 'EX-001' });
+  const productId = await create(request, 'products', { name: `Export ${identifier()}`, partNumber: 'EX-001' });
   const product = await (await request.get(`/api/manufacturing/products/${productId}`)).json();
   const sales = (await (await request.get('/api/accounts')).json()).items;
   const errors: string[] = [], salesCalls: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   await page.route('**/api/**', route => {
     if (route.request().url().includes('/api/manufacturing/')) return route.continue();
-    salesCalls.push(route.request().url()); return route.abort();
+    if (!/\/api\/(?:me|status|settings\/backup-recovery)(?:\?|$)/.test(route.request().url())) salesCalls.push(route.request().url());
+    return route.continue();
   });
   await open(page);
   await expect(page.getByText('Local preview only.', { exact: false })).toBeVisible();
@@ -71,7 +72,7 @@ test('open spreadsheet opens the exported Google Drive file in a new tab, never 
         id: 'test-directory-workbook', name: status.name, provider: 'drive',
         generation: status.generation, workspaceId: status.workspaceId,
         exportedAt: new Date().toISOString(), url: driveUrl,
-        counts: { products: 0, steps: 0, assignments: 0, operations: 0, partners: 0, contacts: 0 },
+        counts: { products: 0, steps: 0, assignments: 0, operations: 0, suppliers: 0, contacts: 0 },
       },
     } });
   });
@@ -85,7 +86,7 @@ test('open spreadsheet opens the exported Google Drive file in a new tab, never 
   await link.click();
   const drive = await popup;
   await expect(drive).toHaveURL(driveUrl);
-  await expect(page).toHaveURL(/\/manufacturing\/settings\?tab=spreadsheet$/);
+  await expect(page).toHaveURL(/\/settings\?tab=spreadsheet$/);
   await drive.close();
 });
 

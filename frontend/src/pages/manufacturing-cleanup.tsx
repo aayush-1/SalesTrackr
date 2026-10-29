@@ -138,7 +138,7 @@ export function ManufacturingCleanup() {
             disabled={locked || resource.loading || !data.canDelete || data.cleanupInProgress}
             onChange={event => setSelected(old => { const next = new Set(old); if (event.target.checked) next.add(row.id); else next.delete(row.id); return next; })} /></td>
           <td><Link className="record-title" to={`/manufacturing/records/${row.id}`}>{row.number}</Link></td>
-          <td><strong>{row.productName}</strong><span className="cell-sub">{row.productReference || 'No part number'}</span></td>
+          <td><strong>{row.productName}</strong><span className="cell-sub">{row.productPartNumber || 'No part number'}</span></td>
           <td>{row.completedCount} / {row.stepCount} operations</td><td>{formatDate(row.completedOn)}</td>
         </tr>)}</tbody>
       </table></div> : !resource.loading && data && <Empty title="Nothing to clean up" text="Completed manufacturing jobs will appear here. Active and cancelled jobs stay protected." />}
