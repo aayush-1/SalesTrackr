@@ -52,6 +52,10 @@ def manufacturing_router(settings, shared_recovery):
     router.include_router(manufacturing_spreadsheet_router(repo, settings))
     router.include_router(manufacturing_files_router(repo, settings))
 
+    from .inventory_api import inventory_router
+
+    router.include_router(inventory_router(repo))
+
     @router.get("/meta")
     def metadata():
         return repo().meta()
@@ -78,6 +82,12 @@ def manufacturing_router(settings, shared_recovery):
     @router.post("/products/{product_id}/steps")
     def add_step(product_id: Identifier, body: Command, request: Request):
         return mutate(request, "add-step", product_id, body)
+
+    @router.post("/products/{product_id}/stock")
+    def adjust_stock(product_id: Identifier, body: Command, request: Request):
+        if body.id != product_id:
+            raise Problem("The product identifier does not match.")
+        return mutate(request, "stock", product_id, body)
 
     @router.post("/products/{product_id}/reorder")
     def reorder(product_id: Identifier, body: Command, request: Request):

@@ -26,7 +26,6 @@ test('cleanup selects only finished records, confirms deletion, retries a lost r
     if (state === 'discarded') return await write(`/records/${saved.entityId}/discard`, { reason: 'Synthetic obsolete enquiry' }, saved);
     if (state === 'active') return saved;
     for (const stage of ['follow_up', 'order_received', 'dispatched', 'delivered']) {
-      if (stage === 'dispatched') saved = await write(`/records/${saved.entityId}/stock`, { updated: true }, saved);
       saved = await write(`/records/${saved.entityId}/stage`, { stage }, saved);
     }
     saved = await write(`/records/${saved.entityId}/payment`, { received: true }, saved);

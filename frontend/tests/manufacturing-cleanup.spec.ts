@@ -4,6 +4,8 @@ import type { ManufacturingDetail, ManufacturingRecord, ManufacturingRecordPrevi
 
 const identifier = () => crypto.randomUUID().replaceAll('-', '');
 async function write(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null, id = identifier()) {
+  if (path === '/products') data = { stockQuantity: 1000, minimumStockQuantity: 0, ...data };
+  if (path === '/records') data = { quantity: 1, ...data };
   const meta = await (await request.get('/api/manufacturing/meta')).json();
   const response = await request.post(`/api/manufacturing${path}`, {
     headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation },

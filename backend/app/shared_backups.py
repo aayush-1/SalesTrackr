@@ -24,7 +24,63 @@ from .domain import Problem, now
 from .manufacturing_backups import archive as product_archive
 from .manufacturing_backups import read_archive as read_product_archive
 from .manufacturing_storage import ManufacturingRepository
-from .storage import digest, encode
+from .storage import digest, encode, history_heads
+
+
+def check_part_links(sales, products):
+    from .inventory import sale_quantities, source_key
+
+    groups = {}
+    for row in sales:
+        groups.setdefault(row["entityId"], []).append(row)
+    current = {}
+    for entity_id, versions in groups.items():
+        heads = history_heads(versions)
+        current[entity_id] = [row for row in versions if row["id"] in heads]
+    models = {
+        entity_id for entity_id, versions in current.items() if versions[0]["entityType"] == "model"
+    }
+    accounts = {
+        entity_id: {m["id"]: m for row in versions for m in row["data"].get("machines", [])}
+        for entity_id, versions in current.items() if versions[0]["entityType"] == "account"
+    }
+    if any(machine["modelId"] not in models for machines in accounts.values()
+           for machine in machines.values()):
+        raise ValueError("An account machine refers to a missing model.")
+    if any(model_id not in models for product in products["products"].values()
+           for model_id in product.get("modelIds", [])):
+        raise ValueError("A product refers to a missing model.")
+    for versions in current.values():
+        for row in versions:
+            data = row["data"]
+            if row["entityType"] == "sent_part":
+                if (
+                    data["accountId"] not in accounts or data["productId"] not in products["products"]
+                    or data.get("machineId") and data["machineId"] not in accounts[data["accountId"]]
+                    or data.get("machineModelId") and data["machineModelId"] not in models
+                ):
+                    raise ValueError("A delivery refers to a missing account, product, machine or model.")
+                continue
+            if row["entityType"] != "record":
+                continue
+            account_machines = accounts.get(row["data"]["accountId"], {})
+            for part in row["data"].get("parts", []):
+                if part["productId"] not in products["products"] or (
+                    part.get("machineId") and part["machineId"] not in account_machines
+                ):
+                    raise ValueError("A sales part refers to a missing product or account machine.")
+            state = products["inventorySources"].get(source_key("sale", row["entityId"]))
+            if data.get("inventoryTracked") or state:
+                posted, demand = sale_quantities(data)
+                if len(versions) != 1 or not data.get("inventoryTracked") or not state or (
+                    state["posted"] != posted or state["demand"] != demand
+                ):
+                    raise ValueError("Sales quantities do not match their stock source.")
+    if any(
+        state["source"] == "sale" and state["demand"] and state["sourceId"] not in current
+        for state in products["inventorySources"].values()
+    ):
+        raise ValueError("Open sales demand refers to a missing record.")
 
 
 def archive(data, *, source, operation_id, actor, control):
@@ -94,6 +150,7 @@ def read_archive(content):
                 raise ValueError("Combined expanded data is too large.")
             sales, sales_manifest = read_sales_archive(parts["salestrackr.zip"])
             products, product_manifest = read_product_archive(parts["producttrackr.zip"])
+            check_part_links(sales, products)
             if (
                 manifest["dataHash"] != digest([sales_manifest["dataHash"], product_manifest["dataHash"]])
                 or manifest["counts"] != {

@@ -13,10 +13,12 @@ from .manufacturing_compat import LEGACY_COLLECTIONS, canonical_counts, canonica
 from .manufacturing_domain import (
     MODELS,
     Assignment,
+    NewProduct,
     Primary,
     RemoveAssignment,
     Reorder,
     Step,
+    StockAdjustment,
 )
 from .storage import digest
 
@@ -30,6 +32,7 @@ class ManufacturingRepository:
 
     def __init__(self, settings, client=None):
         settings.validate_manufacturing()
+        self.settings = settings
         self.mode = settings.mode
         self.client = client or firestore.Client(
             project=settings.manufacturing_project, database=settings.manufacturing_database,
@@ -60,6 +63,7 @@ class ManufacturingRepository:
         self.sync()
         self.migrate_legacy_naming()
         self.index_legacy_products()
+        self.index_model_scopes()
 
     def migrate_legacy_naming(self):
         for _ in range(3):
@@ -165,6 +169,32 @@ class ManufacturingRepository:
 
     def ref(self, kind, entity_id):
         return self.collection(kind).document(entity_id)
+
+    def index_model_scopes(self):
+        if self.control.get("productModelIndexDataset") == self.control["activeDataset"]:
+            return
+        generation, dataset = self.control["generation"], self.control["activeDataset"]
+
+        @firestore.transactional
+        def update(transaction, reference=None):
+            control = self.workspace.get(transaction=transaction).to_dict()
+            if control["generation"] != generation or control["activeDataset"] != dataset:
+                raise Problem("ProductTrackr changed. Reload before continuing.", 409, "workspace_changed")
+            if control.get("maintenance"):
+                raise Problem("ProductTrackr maintenance is in progress.", 503, "maintenance")
+            if reference is None:
+                transaction.update(self.workspace, {"productModelIndexDataset": dataset})
+                return
+            product = reference.get(transaction=transaction).to_dict()
+            scopes = (product or {}).get("modelIds") or ["*"]
+            if product and product.get("modelScopes") != scopes:
+                transaction.update(reference, {"modelScopes": scopes})
+                transaction.update(self.workspace, {"sequence": control["sequence"] + 1})
+
+        for snapshot in self.collection("products").select([]).stream():
+            update(self.client.transaction(), snapshot.reference)
+        update(self.client.transaction())
+        self.sync()
 
     @staticmethod
     def check(value, expected):
@@ -458,6 +488,9 @@ class ManufacturingRepository:
                 return prior["result"]
             # Serializing on the control document protects query-based relationship checks.
             writes, deletes = self.plan(transaction, action, target, body, actor)
+            from .inventory import check_budget
+
+            check_budget(writes, extra_writes=len(deletes) + 2)
             for reference, value in writes:
                 transaction.set(reference, value)
             for reference in deletes:
@@ -477,15 +510,30 @@ class ManufacturingRepository:
 
             return ManufacturingRecords(self).plan(tx, action.split(":")[1], target, body, actor)
         writes, deletes = [], []
+        from .inventory import Inventory, project_stock
+
+        inventory = Inventory(self)
 
         def put(kind, old, fields, entity_id):
             value = self.changed(old, fields, actor, entity_id)
             writes.append((self.ref(kind, entity_id), value))
             return value
 
+        if action == "stock":
+            product = self.read("products", target, tx)
+            self.check(product, body.baseVersion)
+            data = StockAdjustment.model_validate(body.data)
+            return inventory.manual(product, data, body, actor), []
+
         if action.startswith("create:") or action.startswith("edit:"):
             verb, kind = action.split(":")
-            fields = MODELS[kind].model_validate(body.data).model_dump()
+            schema = NewProduct if kind == "products" and verb == "create" else MODELS[kind]
+            fields = schema.model_validate(body.data).model_dump()
+            if kind == "products" and verb == "edit":
+                if {"stockQuantity", "minimumStockQuantity"} & set(body.data):
+                    raise Problem("Use Edit stock to change product quantities.")
+                fields.pop("stockQuantity", None)
+                fields.pop("minimumStockQuantity", None)
             old = self.ref(kind, body.id).get(transaction=tx).to_dict()
             if verb == "create" and old:
                 raise Problem("This manufacturing identifier already exists.", 409, "record_exists")
@@ -504,7 +552,25 @@ class ManufacturingRepository:
                 fields["stepIds"] = []
             if kind == "products":
                 fields["searchChars"] = self.product_search_chars(fields)
-            put(kind, old, {**fields, "nameKey": fields["name"].casefold()}, body.id)
+                fields["modelScopes"] = fields["modelIds"] or ["*"]
+                if fields["modelIds"]:
+                    sales = self.client.collection("workspaces").document(self.settings.firestore_workspace)
+                    control = sales.get(transaction=tx).to_dict()
+                    if not control or control.get("maintenance"):
+                        raise Problem("The Sales workspace is unavailable or recovering.", 503, "maintenance")
+                    for model_id in fields["modelIds"]:
+                        model = sales.collection("datasets").document(control["activeDataset"]).collection(
+                            "entities",
+                        ).document(model_id).get(transaction=tx).to_dict()
+                        if not model or model["kind"] != "model" or model["conflicted"]:
+                            raise Problem("Choose an existing, unconflicted Sales machine model.")
+            saved = put(kind, old, {**fields, "nameKey": fields["name"].casefold()}, body.id)
+            if kind == "products" and old is None:
+                writes[-1] = (self.ref(kind, body.id), project_stock(saved))
+                writes.append(inventory.movement(
+                    {**saved, "stockQuantity": None}, saved["stockQuantity"], kind="opening",
+                    source_id=body.id, write_id=body.writeId, actor=actor, reason="Initial stock",
+                ))
             return writes, deletes
 
         if action in ("add-step", "reorder"):

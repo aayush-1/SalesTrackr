@@ -12,8 +12,8 @@ A private sales workspace: one customer account, one record per enquiry, and a d
 - Green reached stages, optional actual dates, automatic recording timestamps, and correction history.
 - A payment-details box with a **Received** button; no order amounts, balances, partial-payment inputs, or payment columns in sales tables.
 - A feedback box below Payment with a **Feedback received** button, disabled until the record is closed. Confirmation saves the received date and remains in history; **Undo feedback received** corrects a mistaken click.
-- A separate **Stock update** box between Payment and Feedback. **Stock updated** becomes available at Order in hand, records the confirmation date and keeps history. Stock confirmation is required before dispatch, not as a separate closure condition. It does not update inventory quantities or advance stages automatically.
-- **Stock update pending**, directly below Feedback pending, lists non-discarded confirmed orders whose stock update is not confirmed, including existing dispatched, delivered and closed records.
+- Product stock and minimum quantities, quantity-bearing sales parts, and an **Order in hand shortage** report combining demand before Dispatch.
+- ProductTrackr **Low stock**, audited manual stock editing, and manufacturing quantities credited when the entire job completes.
 - **Feedback pending** lists closed, non-discarded records whose feedback is not yet received, including existing closed records. Confirming feedback removes a record from this view without changing its Closed stage or payment state.
 - Stage tabs show only the current status: **New leads**, **Follow-ups**, **Order in hand**, **Dispatched**, **Delivered**, and **Closed**. Payment pending and Payment received remain separate views.
 - **Lead acquired date** filters by day/month/range in every view, showing those leads' current progress today. **Current sales stage** lists only relevant stages and is hidden on single-stage tabs.
@@ -26,25 +26,19 @@ A private sales workspace: one customer account, one record per enquiry, and a d
   or closed records with feedback received, including their saved history. Accounts, contacts and
   existing backups are preserved; deletion requires selecting records and typing `DELETE`.
 
-**Received** confirms payment and automatically closes an already-delivered sale. Payment can be received before dispatch, independently of stock confirmation. Closing still requires delivery and payment receipt; stock is checked when dispatching instead. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
+**Received** confirms payment and automatically closes an already-delivered sale. Payment can be received before dispatch. Closing requires delivery and payment receipt; stock is checked at Dispatch. Payment notes can be saved independently. This replaces the earlier amount-based payment UI; historical amounts remain in saved versions.
 
 Feedback is tracked separately after closure. Undo feedback receipt before reopening a record to correct its stage; the previous feedback confirmation remains in history. Discarded records retain their feedback state and are read-only.
 
-Stock update is tracked separately once an order is confirmed. Dispatch is blocked
-until stock is updated; the dispatch date cannot precede the stock confirmation.
-Existing later-stage records without the new fields remain valid and show Pending;
-their history and stage dates are not rewritten or bulk-migrated. The flag and date
-are stored on the next save. Correct a dispatched record back to Order in hand
-before undoing stock confirmation. Undo stock confirmation before removing order
-confirmation. Discarded records retain
-their stock state and remain read-only. Firestore updates its derived queue indexes
-per dataset/version, without rewriting revision payloads, stage dates or history.
-The index marker also tracks the workspace sequence so an in-flight save from the
-previous application revision is repaired safely during deployment.
+For newly created shared-workspace sales, Dispatch deducts each product's combined part quantity
+atomically or fails without changing the sale or stock. Delivered and Closed do not deduct again.
+Returning to Order in hand or earlier returns the deducted quantities; returning only to Dispatched
+does not. Dispatch retries and sent-part corrections reconcile the difference without duplicate changes.
+Existing records remain untracked and are not replayed or bulk-migrated.
 
 Existing Quotation pending records appear as New lead, and Quotation sent records appear as Follow-up. An existing Follow-up date takes precedence; otherwise its date comes from the retired Quotation sent milestone. Later stages and quotation references stay intact, and original milestone dates remain in immutable history. No Quotation sent or Awaiting delivery tab is needed.
 
-No product catalogue, Excel import, amount/balance tracking, billing/invoice generation, refunds/payment ledger, formal order-cancellation processing, or performance dashboard. Discarding is a record flag, not a refund or deletion; restoring discarded records is not implemented. The Excel workbook informed the workflow; its customer data is not included.
+No Excel import, amount/balance tracking, billing/invoice generation, refunds/payment ledger, formal order-cancellation processing, or performance dashboard. Discarding is a record flag, not a refund or deletion; restoring discarded records is not implemented. The Excel workbook informed the workflow; its customer data is not included.
 
 ## Run locally
 
@@ -137,7 +131,8 @@ See [Firestore layout, backup safety, and offline recovery](docs/architecture.md
 The sidebar gear opens the same `/settings` page from either Trackr, with **General**,
 **Backup and recovery**, **Sales record cleanup**, **Manufacturing record cleanup**, and
 **Products spreadsheet export** tabs. Old `/manufacturing/settings` links redirect there.
-Sales and manufacturing records remain independent; product-to-sales integration is not included.
+Sales records can link catalog parts and optional customer machines. Manufacturing jobs retain
+their independent workflow; sales deliveries do not change manufacturing progress.
 
 Shared Settings and combined recovery are the only configuration when both Trackrs are present;
 there is no feature flag or separate recovery page. For local preview, add these variables to the
@@ -181,6 +176,67 @@ retain old archives. Verify all existing product URLs, workbook links, a combine
 recovery before removing the old root or revoking its authorization. Do not deploy this change
 to production until those migration checks are complete.
 
+## Models, account machines, and parts sent
+
+Manage **Models** in SalesTrackr. An account can have multiple named machines of the same model;
+serial number and manufacturing year are optional. Products fit one or more models, or **Common**
+for every model. An empty model selection means Common.
+
+Sales records accept optional catalog parts, each optionally assigned to a machine at that account.
+The first closure publishes them to **Sales History** using the Delivered date. Closed-sale
+part/date corrections update those deliveries with audit history. Reopening retains deliveries
+while Delivered remains; undoing/reinstating delivery withdraws/reactivates them without duplicates.
+Deleting a sales record does not delete its independently retained deliveries.
+
+**Add past delivery** records missed deliveries without creating a sale. Corrections and voids require
+a reason. **Sales History** filters by account, machine, and date. **Potential Spares machine wise** shows
+compatible products, green sent status, and the latest delivery date. A delivery without a machine
+counts for every compatible machine at that account; an assigned delivery counts only for that machine.
+**Create PDF** downloads all matching results, not just the current page. Sales History exports account,
+machine, date-range and withdrawn-entry filters; Potential Spares machine wise exports compatible
+parts for the selected account and machine, including delivery status and last-sent dates.
+
+ProductTrackr's **Master Product's List** tab lists product names, part numbers, and notes for the selected
+model, including Common products, with **Create PDF** for the complete selected model's list.
+**Order in hand shortage** is available in both workspaces (above Low stock
+in ProductTrackr); its sales breakdown links show company names.
+
+New sale parts require positive whole-unit quantities. Manual past deliveries may record a known
+quantity but never change current stock. Historical unknown quantities remain unknown.
+Free-text alternatives to catalog parts are not supported.
+
+Combined backups include models, machines, structured sales parts, and every delivery/audit version.
+The existing ZIP structure and format numbers are unchanged. The Products workbook adds **Models**,
+showing model names or Common, plus **Stock quantity** and **Minimum stock quantity**, while retaining
+its existing Drive links and managed file identity. Combined backups also preserve inventory source
+positions and stock movement audit; restoration does not replay those movements.
+
+For extensive synthetic data, use the local emulator/shared configuration above with separate namespaces:
+
+```powershell
+$env:FIRESTORE_PROJECT_ID = "demo-machine-sales-local"
+$env:PRODUCTTRACKR_FIRESTORE_PROJECT_ID = "demo-machine-sales-local"
+$env:FIRESTORE_WORKSPACE_ID = "machine-sales-preview"
+$env:PRODUCTTRACKR_WORKSPACE_ID = "machine-products-preview"
+$env:DEMO_DATA_DIR = ".local-data\machine-sales-preview"
+$env:PRODUCTTRACKR_BACKUP_STORAGE = "local"
+$env:GOOGLE_TOKEN_JSON = ""
+.\.venv\Scripts\python.exe -m scripts.seed_machine_sales_demo
+```
+
+The seeder refuses non-local emulator targets and nonempty workspaces. A completed preview is retained
+on subsequent runs. Its `scenarios.json` identifies draft/closed/corrected/reopened/withdrawn/reinstated
+sales, late-added parts, manual corrections/voids, and retained history after source deletion.
+Existing local workspaces and production data are not changed.
+
+The inventory preview uses `scripts.seed_inventory_demo` with project `demo-inventory-local`,
+Sales workspace `inventory-sales-local`, Product workspace `inventory-products-local`, and local
+data directory `.local-data\inventory-local`. It requires the same credential-free localhost
+emulator configuration. It includes competing orders, repeated machine lines, stock thresholds,
+manufacturing output and blocked undo, corrections/re-dispatch, manual counts, historical deliveries,
+and deleted-source retention. A combined backup and directory workbook are generated locally.
+Existing nonempty workspaces are never overwritten.
+
 ## ProductTrackr local workspace
 
 ProductTrackr is an independent manufacturing workspace at `/manufacturing`,
@@ -196,8 +252,9 @@ saved Product to copy its operation route, then explicitly assign/start and comp
 operation in sequence. Multiple jobs for the same Product advance independently. Copied routes
 and actual assignment labels stay unchanged by later directory edits; new assignments use the
 source step's currently linked suppliers. The overview shows work in process, waiting jobs,
-current suppliers and completed jobs. No quantities, stock, costing or supplier notifications
-are included.
+current suppliers and completed jobs. New jobs require a quantity; only final completion credits
+finished stock. Reasoned quantity corrections reconcile the difference; undoing completion is blocked
+if it would make stock negative. Costing and supplier notifications are not included.
 
 **Supplier work**, directly below Manufacturing records in navigation, opens a searchable,
 paginated sheet at `/manufacturing/supplier-work`. It shows one entry per supplier, with counts of
@@ -316,7 +373,7 @@ The Products-first workbook includes ordered Product operations, all Supplier li
 Operations, Suppliers and Contacts, plus export information. Stable internal keys and
 clickable cross-sheet references preserve relationships, including primary suppliers,
 optional company contacts, repeated operations and unlinked directory entries.
-The Products sheet also includes a clickable **Drive folder** column for saved folder
+The Products sheet includes **Models** (Common or linked model names) and a clickable **Drive folder** column for saved folder
 connections, including restored links. Products without a connected folder have a blank cell;
 exporting never creates folders or downloads their contents.
 Part number is user-entered; internal keys disambiguate duplicate labels.

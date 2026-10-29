@@ -8,6 +8,8 @@ async function headers(request: APIRequestContext) {
   return { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation };
 }
 async function write(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null) {
+  if (path === '/products') data = { stockQuantity: 1000, minimumStockQuantity: 0, ...data };
+  if (path === '/records') data = { quantity: 1, ...data };
   const id = identifier();
   const response = await request.post(`/api/manufacturing${path}`, {
     headers: await headers(request), data: { writeId: identifier(), id, baseVersion, data },

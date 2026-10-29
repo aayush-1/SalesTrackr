@@ -7,14 +7,26 @@ export const labels: Record<Stage, string> = {
   new_lead: 'New lead', follow_up: 'Follow-up',
   order_received: 'Order in hand', dispatched: 'Dispatched', delivered: 'Delivered', closed: 'Closed',
 };
-export type Kind = 'account' | 'contact' | 'record';
-export interface Account { name: string; address: string; taxReference: string; notes: string }
+export type Kind = 'account' | 'contact' | 'record' | 'model' | 'sent_part';
+export interface MachineModel { name: string }
+export interface AccountMachine { id: string; name: string; modelId: string; serialNumber?: string; manufacturingYear?: number | null }
+export interface SalePart { id: string; productId: string; machineId: string | null; quantity?: number | null }
+export interface Account { name: string; address: string; taxReference: string; notes: string; machines?: AccountMachine[] }
+export interface SentPart {
+  accountId: string; accountName: string; productId: string; productName: string; productPartNumber: string;
+  machineId: string | null; machineName: string; machineModelId: string | null; machineModelName: string;
+  serialNumber: string; manufacturingYear: number | null; sentOn: string;
+  source: 'sale' | 'manual'; sourceRecordId: string | null; sourceLineId: string | null; active: boolean;
+  quantity?: number | null;
+}
 export interface AccountMatches extends Meta {
   name: string; total: number; exactCount: number;
   items: { revision: Revision<Account>; match: 'exact' | 'similar'; conflicted: boolean }[];
 }
 export interface Contact { accountId: string; name: string; email: string; phone: string; designation: string }
 export interface SalesRecord {
+  parts?: SalePart[];
+  partsPublished?: boolean;
   accountId: string;
   contactId: string | null;
   productNotes: string;
@@ -30,8 +42,7 @@ export interface SalesRecord {
   paymentNote: string;
   feedbackReceived?: boolean;
   feedbackReceivedOn?: string | null;
-  stockUpdated?: boolean;
-  stockUpdatedOn?: string | null;
+  inventoryTracked?: boolean;
   nextFollowUpOn: string | null;
   followUps: { id: string; note: string; occurredOn: string; recordedAt: string }[];
 }
@@ -56,7 +67,7 @@ export interface Save<T> extends Detail<T> {
   revisionIsCurrent?: boolean;
   related?: RecordRelations;
 }
-export interface Me extends WorkspaceStorage { email: string; mode: 'demo' | 'production'; today: string }
+export interface Me extends WorkspaceStorage { email: string; mode: 'demo' | 'production'; today: string; manufacturingEnabled?: boolean }
 export interface BackupCounts {
   account: number; contact: number; record: number; revisions: number;
   products?: number; manufacturingRecords?: number;
@@ -100,7 +111,6 @@ export const views: Record<string, { title: string; description: string; stages:
   pending: { title: 'Payment pending', description: 'All outstanding confirmed orders, including older and delivered orders.', stages: stages.slice(2, 5) },
   paid: { title: 'Payment received', description: 'Orders with payment receipt confirmed.', stages: stages.slice(2) },
   'feedback-pending': { title: 'Feedback pending', description: 'Closed sales records awaiting feedback. Confirm feedback receipt on the record to remove it from this list.', stages: ['closed'] },
-  'stock-pending': { title: 'Stock update pending', description: 'Confirmed orders awaiting stock update before dispatch. Existing dispatched, delivered and closed records without confirmation are also listed.', stages: stages.slice(2) },
   discarded: { title: 'Discarded', description: 'Records set aside with a remark. Original stages and history are retained.', stages },
 };
 export function currentStageDates(data: SalesRecord): Partial<Record<Stage, string>> {

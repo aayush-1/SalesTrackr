@@ -254,9 +254,7 @@ test('create account and record, progress, pay, close, filter and retain history
   await expect(page.locator('tbody tr')).toHaveCount(1);
   await expect(page.getByRole('columnheader', { name: /Payment|Pending|Amount/ })).toHaveCount(0);
   await page.goto(recordUrl);
-  await expect(page.getByRole('button', { name: 'Dispatched', exact: true })).toBeDisabled();
-  await page.getByRole('button', { name: 'Stock updated', exact: true }).click();
-  await expect(page.locator('.stock-panel .badge')).toHaveText('Updated');
+  await expect(page.getByRole('button', { name: 'Dispatched', exact: true })).toBeEnabled();
   for (const next of ['Dispatched', 'Delivered']) {
     await page.getByRole('button', { name: next, exact: true }).click();
     await page.getByRole('button', { name: 'Mark stage reached' }).click();
@@ -421,7 +419,6 @@ test('sales filters use acquisition dates and only relevant current stages', asy
   const scopedViews = [
     ['pending', ['All stages in this view', 'Order in hand', 'Dispatched', 'Delivered']],
     ['paid', ['All stages in this view', 'Order in hand', 'Dispatched', 'Delivered', 'Closed']],
-    ['stock-pending', ['All stages in this view', 'Order in hand', 'Dispatched', 'Delivered', 'Closed']],
   ] as const;
   for (const [view, options] of scopedViews) {
     await page.goto(`/view/${view}`);
@@ -431,7 +428,7 @@ test('sales filters use acquisition dates and only relevant current stages', asy
   await expect(page.getByRole('heading', { name: 'Follow-ups', exact: true })).toBeVisible();
   await expect(page.getByRole('navigation').getByRole('link')).toHaveText([
     'Overview', 'All sales records', 'Accounts', 'New leads', 'Follow-ups', 'Order in hand',
-    'Dispatched', 'Delivered', 'Payment pending', 'Payment received', 'Closed', 'Feedback pending', 'Stock update pending', 'Discarded',
+    'Dispatched', 'Delivered', 'Payment pending', 'Payment received', 'Closed', 'Feedback pending', 'Discarded',
   ]);
   await page.getByLabel('Lead acquired date', { exact: true }).selectOption('today');
   await expect(page.getByLabel('Filter by date')).toHaveCount(0);

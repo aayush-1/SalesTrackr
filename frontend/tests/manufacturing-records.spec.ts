@@ -4,6 +4,8 @@ import type { ManufacturingDetail, ManufacturingMeta, ManufacturingRecordDetail,
 
 const identifier = () => crypto.randomUUID().replaceAll('-', '');
 async function write(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null, id = identifier(), method = 'POST') {
+  if (path === '/products') data = { stockQuantity: 1000, minimumStockQuantity: 0, ...data };
+  if (path === '/records') data = { quantity: 1, ...data };
   const meta = await (await request.get('/api/manufacturing/meta')).json() as ManufacturingMeta;
   const response = await request.fetch(`/api/manufacturing${path}`, {
     method, headers: { 'X-SalesTrackr-Request': '1', 'X-ProductTrackr-Workspace': meta.workspaceId, 'X-ProductTrackr-Generation': meta.generation },
@@ -116,6 +118,7 @@ test('independent jobs run sequentially from product creation through completed 
   await expect(page.getByLabel('Product process', { exact: true })).toHaveValue(source.productId);
   await expect(page.locator('.bt-route-preview li')).toHaveCount(3);
   await page.getByLabel('Job notes', { exact: true }).fill('Synthetic browser job');
+  await page.getByLabel('Quantity *', { exact: true }).fill('5');
   await page.getByRole('button', { name: 'Create manufacturing record', exact: true }).click();
   await expect(page).toHaveURL(/\/manufacturing\/records\/[a-z0-9]{32}$/);
   const firstId = new URL(page.url()).pathname.split('/').at(-1)!;
@@ -229,6 +232,7 @@ test('lost create, completion and cancellation responses retry exact writes even
   await page.goto(`/manufacturing/records/new?productId=${source.productId}`);
   await expect(page.locator('.bt-route-preview li')).toHaveCount(3);
   await page.getByLabel('Job notes', { exact: true }).fill('Retry job notes');
+  await page.getByLabel('Quantity *', { exact: true }).fill('1');
   await page.getByRole('button', { name: 'Create manufacturing record', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('retry the same change');
   await expect(page.getByLabel('Job notes', { exact: true })).toBeDisabled();
@@ -270,6 +274,7 @@ test('changed creation previews are rejected without losing notes and can be rev
   await page.goto(`/manufacturing/records/new?productId=${source.productId}`);
   await expect(page.locator('.bt-route-preview li')).toHaveCount(3);
   await page.getByLabel('Job notes', { exact: true }).fill('Keep this job draft');
+  await page.getByLabel('Quantity *', { exact: true }).fill('1');
   const firstStep = (await source.getProduct()).steps[0];
   await write(request, `/steps/${firstStep.id}`, { operationId: firstStep.operationId, instructions: 'Revised drawing for this preview' }, firstStep.version, firstStep.id, 'PUT');
   await page.getByRole('button', { name: 'Create manufacturing record', exact: true }).click();

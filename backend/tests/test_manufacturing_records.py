@@ -26,6 +26,7 @@ def job(client, product, body=None):
             "productId": product["id"],
             "sourceToken": preview.json()["sourceToken"],
             "notes": "Test job",
+            "quantity": 1,
         },
         body=body,
     )
@@ -34,7 +35,7 @@ def job(client, product, body=None):
 
 
 def transition(client, current, action, step_id=None, **data):
-    if action not in ("cancel", "undo"):
+    if action not in ("cancel", "undo", "quantity"):
         data["stepId"] = step_id or current["operations"][current["currentIndex"]]["id"]
     response, body = command(
         client,
@@ -243,7 +244,7 @@ def test_creation_rejects_empty_and_changed_preview_but_not_unrelated_changes(pr
     preview = client.get(f"/api/manufacturing/records/preview/{product['id']}").json()
     create(client, "products", name="Unrelated edit")
     response, _ = command(
-        client, "/records", {"productId": product["id"], "sourceToken": preview["sourceToken"]}
+        client, "/records", {"productId": product["id"], "sourceToken": preview["sourceToken"], "quantity": 1}
     )
     assert response.status_code == 200
     current = detail(client, product)["steps"][0]
@@ -262,7 +263,7 @@ def test_creation_rejects_empty_and_changed_preview_but_not_unrelated_changes(pr
         == 200
     )
     stale, _ = command(
-        client, "/records", {"productId": product["id"], "sourceToken": preview["sourceToken"]}
+        client, "/records", {"productId": product["id"], "sourceToken": preview["sourceToken"], "quantity": 1}
     )
     assert stale.status_code == 409
     assert client.get("/api/manufacturing/records?view=all").json()["total"] == 1

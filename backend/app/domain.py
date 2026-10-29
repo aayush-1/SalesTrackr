@@ -21,10 +21,12 @@ Stage = Literal[
     "delivered",
     "closed",
 ]
-EntityType = Literal["account", "contact", "record"]
+EntityType = Literal["account", "contact", "record", "model", "sent_part"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, max_length=10000)]
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 Identifier = Annotated[str, StringConstraints(pattern=r"^[a-zA-Z0-9_-]{10,160}$")]
+StockQuantity = Annotated[int, Field(strict=True, ge=0, le=10**12)]
+PartQuantity = Annotated[int, Field(strict=True, ge=1, le=10**12)]
 
 
 def today() -> date:
@@ -58,11 +60,101 @@ class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-class AccountData(Model):
+class MachineModelData(Model):
+    name: Name
+
+    @model_validator(mode="after")
+    def real_model(self):
+        if self.name.casefold() == "common":
+            raise ValueError("Common is a product option, not a machine model.")
+        return self
+
+
+class AccountMachine(Model):
+    id: Identifier
+    name: Name
+    modelId: Identifier
+    serialNumber: Annotated[str, StringConstraints(max_length=200)] = ""
+    manufacturingYear: int | None = Field(default=None, ge=1000)
+
+    @model_validator(mode="after")
+    def valid_year(self):
+        if self.manufacturingYear and self.manufacturingYear > today().year:
+            raise ValueError("Manufacturing year cannot be in the future.")
+        return self
+
+
+class AccountFields(Model):
     name: Name
     address: Text = ""
     taxReference: Annotated[str, StringConstraints(max_length=100)] = ""
     notes: Text = ""
+
+
+class AccountData(AccountFields):
+    machines: list[AccountMachine] = Field(default_factory=list, max_length=200)
+
+    @model_validator(mode="after")
+    def machine_ids(self):
+        if len({machine.id for machine in self.machines}) != len(self.machines):
+            raise ValueError("Each machine must have a distinct identifier.")
+        return self
+
+
+class SalePart(Model):
+    id: Identifier
+    productId: Identifier
+    machineId: Identifier | None = None
+    quantity: PartQuantity | None = None
+
+
+class NewSalePart(SalePart):
+    quantity: PartQuantity
+
+
+class PartsChange(Model):
+    parts: list[SalePart] = Field(default_factory=list, max_length=100)
+    reason: Text = ""
+
+    @model_validator(mode="after")
+    def distinct_parts(self):
+        if len({part.id for part in self.parts}) != len(self.parts):
+            raise ValueError("Each part line must have a distinct identifier.")
+        if len({(part.productId, part.machineId) for part in self.parts}) != len(self.parts):
+            raise ValueError("Choose each product/machine combination only once.")
+        return self
+
+
+class SentPartData(Model):
+    accountId: Identifier
+    accountName: Name
+    productId: Identifier
+    productName: Name
+    productPartNumber: Text = ""
+    machineId: Identifier | None = None
+    machineName: Text = ""
+    machineModelId: Identifier | None = None
+    machineModelName: Text = ""
+    serialNumber: Text = ""
+    manufacturingYear: int | None = None
+    sentOn: date
+    source: Literal["sale", "manual"]
+    sourceRecordId: Identifier | None = None
+    sourceLineId: Identifier | None = None
+    active: bool = True
+    quantity: PartQuantity | None = None
+
+    @model_validator(mode="after")
+    def valid_source(self):
+        if self.sentOn > today():
+            raise ValueError("Delivery date cannot be in the future.")
+        if self.source == "sale" and not (self.sourceRecordId and self.sourceLineId):
+            raise ValueError("A sale delivery requires its source record and line.")
+        if self.source == "manual" and (self.sourceRecordId or self.sourceLineId):
+            raise ValueError("Manual deliveries cannot impersonate a sales record.")
+        if self.machineId and not (self.machineName and self.machineModelId):
+            raise ValueError("Machine deliveries require their machine snapshot.")
+        return self
 
 
 class ContactData(Model):
@@ -83,6 +175,7 @@ class RecordFields(Model):
 
 class NewRecord(RecordFields):
     acquiredOn: date | None = None
+    parts: list[NewSalePart] = Field(default_factory=list, max_length=100)
 
 
 class ProductNotesChange(Model):
@@ -123,14 +216,19 @@ class RecordData(RecordFields):
     paymentNote: Text = ""
     feedbackReceived: bool = False
     feedbackReceivedOn: date | None = None
-    stockUpdated: bool = False
-    stockUpdatedOn: date | None = None
     nextFollowUpOn: date | None = None
     followUps: list[FollowUpEntry] = Field(default_factory=list, max_length=2000)
+    parts: list[SalePart] = Field(default_factory=list, max_length=100)
+    partsPublished: bool = False
+    inventoryTracked: bool = False
 
     @model_validator(mode="before")
     @classmethod
     def read_legacy_workflow(cls, data: object):
+        if isinstance(data, dict):
+            data = {
+                key: value for key, value in data.items() if key not in ("stockUpdated", "stockUpdatedOn")
+            }
         if (
             isinstance(data, dict)
             and data.get("workflowVersion", 1) in (1, 2)
@@ -144,6 +242,7 @@ class RecordData(RecordFields):
 
     @model_validator(mode="after")
     def validate_journey(self):
+        PartsChange(parts=self.parts)
         reached = [stage for stage in STAGES if stage in self.stageDates]
         expected = STAGES[: STAGES.index(reached[-1]) + 1] if reached else []
         if self.workflowVersion == 1 and "follow_up" not in self.stageDates:
@@ -181,13 +280,6 @@ class RecordData(RecordFields):
                 raise ValueError("Feedback date must be between closure and today.")
         elif self.feedbackReceivedOn is not None:
             raise ValueError("A feedback date requires feedback receipt.")
-        if self.stockUpdated:
-            if not ordered or self.stockUpdatedOn is None:
-                raise ValueError("Stock update requires Order in hand and an updated date.")
-            if not self.stageDates["order_received"] <= self.stockUpdatedOn <= today():
-                raise ValueError("Stock update date must be between order confirmation and today.")
-        elif self.stockUpdatedOn is not None:
-            raise ValueError("A stock update date requires stock update confirmation.")
         return self
 
 
@@ -207,10 +299,6 @@ class PaymentChange(Model):
 
 class FeedbackChange(Model):
     received: bool
-
-
-class StockChange(Model):
-    updated: bool
 
 
 T = TypeVar("T")
@@ -270,13 +358,6 @@ def stage_change(record: RecordData, change: StageChange) -> RecordData:
         raise Problem("A correction or backtrack requires a reason.")
     if change.stage != "closed" and record.feedbackReceived:
         raise Problem("Undo feedback received before reopening the record.")
-    if target < STAGES.index("order_received") and record.stockUpdated:
-        raise Problem("Undo stock updated before removing order confirmation.")
-    if change.stage == "dispatched":
-        if not record.stockUpdated:
-            raise Problem("Confirm the stock update before dispatching this sales record.")
-        if (change.occurredOn or today()) < record.stockUpdatedOn:
-            raise Problem("Dispatch date cannot precede the stock update date.")
     before_order = target < STAGES.index("order_received")
     if before_order and record.paymentReceived:
         raise Problem("Correct the payment before removing order confirmation.")
@@ -332,19 +413,6 @@ def feedback_change(record: RecordData, change: FeedbackChange) -> RecordData:
     )
 
 
-def stock_change(record: RecordData, change: StockChange) -> RecordData:
-    if "order_received" not in record.stageDates:
-        raise Problem("Confirm the order before confirming a stock update.")
-    if "dispatched" in record.stageDates and not change.updated:
-        raise Problem("Correct the record back to Order in hand before undoing stock confirmation.")
-    result = {
-        **record.model_dump(),
-        "stockUpdated": change.updated,
-        "stockUpdatedOn": (record.stockUpdatedOn or today()) if change.updated else None,
-    }
-    return RecordData.model_validate(result)
-
-
 def add_followup(record: RecordData, entry: FollowUp) -> RecordData:
     if not entry.note.strip():
         raise Problem("Enter a follow-up note.")
@@ -364,4 +432,7 @@ def add_followup(record: RecordData, entry: FollowUp) -> RecordData:
     return RecordData.model_validate(result)
 
 
-MODELS = {"account": AccountData, "contact": ContactData, "record": RecordData}
+MODELS = {
+    "account": AccountData, "contact": ContactData, "record": RecordData,
+    "model": MachineModelData, "sent_part": SentPartData,
+}

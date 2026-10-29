@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { ChevronRight, Mail, Pencil, Plus, UserRound } from 'lucide-react';
-import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useOutletContext, useParams } from 'react-router-dom';
 import { api, useResource, useSave } from '../api';
 import { Alert, Back, Completeness, Empty, Field, Loading, Modal, PageHeader, SaveButton, TrackedForm, formValues, markFormSaved } from '../components';
-import type { Account, AccountMatches, Contact, Detail, Page, Revision } from '../types';
+import type { Account, AccountMatches, Contact, Detail, Me, Page, Revision } from '../types';
 import { RecordList } from './lists';
+import { AccountMachines, ManualDeliveryForm } from './sales-parts';
 
 export function Accounts() {
   const [search, setSearch] = useState('');
@@ -132,19 +133,23 @@ export function AccountDetail() {
   const account = useResource<Detail<Account>>(`/entities/account/${id}`);
   const contacts = useResource<{ items: Revision<Contact>[] }>(`/contacts?accountId=${id}`);
   const [edit, setEdit] = useState(false);
+  const [delivery, setDelivery] = useState(false);
+  const me = useOutletContext<Me>();
   const [contact, setContact] = useState<Revision<Contact> | 'new' | null>(null);
   return <><Back to="/accounts">All accounts</Back>
     {account.error && <Alert>{account.error}</Alert>}{account.loading && <Loading />}
     {account.data && <>
       <PageHeader eyebrow="ACCOUNT" title={account.data.revision.data.name} description={account.data.revision.data.address || 'Location not added'}
-        action={<div className="actions"><button className="button" onClick={() => setEdit(true)}><Pencil size={15} />Edit account</button><Link className="button primary" to={`/records/new?accountId=${id}`}><Plus size={16} />New sales record</Link></div>} />
+        action={<div className="actions"><button className="button" onClick={() => setEdit(true)}><Pencil size={15} />Edit account</button>{me.manufacturingEnabled && <button className="button" onClick={() => setDelivery(true)}><Plus size={15} />Add past delivery</button>}<Link className="button primary" to={`/records/new?accountId=${id}`}><Plus size={16} />New sales record</Link></div>} />
       {location.state?.notice && <Alert tone="warning">{location.state.notice}</Alert>}
       <div className="account-detail-grid"><section className="panel details-panel"><h2>Company details</h2><dl><dt>GST / tax reference</dt><dd>{account.data.revision.data.taxReference || 'Not added'}</dd><dt>Notes</dt><dd className="pre-wrap">{account.data.revision.data.notes || 'No notes yet.'}</dd></dl></section>
         <section className="panel details-panel"><div className="section-heading compact"><h2>Contact people</h2><button className="text-button" onClick={() => setContact('new')}><Plus size={15} />Add contact</button></div>
           {contacts.error && <Alert>{contacts.error}</Alert>}{contacts.data?.items.map(row => <div className="contact-row" key={row.entityId}><UserRound size={20} /><div><strong>{row.data.name}</strong><small>{row.data.designation}</small><span><Mail size={12} /> {row.data.email || row.data.phone || 'No contact details'}</span>{row.data.email && row.data.phone && <span>{row.data.phone}</span>}</div><button className="icon-button" aria-label={`Edit ${row.data.name}`} onClick={() => setContact(row)}><Pencil size={16} /></button></div>)}
           {!contacts.loading && !contacts.error && !contacts.data?.items.length && <p className="muted">No contact people yet.</p>}
         </section></div>
+      {me.manufacturingEnabled && <AccountMachines account={account.data.revision} />}
       <div className="section-title"><h2>Sales records for this account</h2></div><RecordList accountId={id} />
+      {delivery && <ManualDeliveryForm accountId={id} close={() => setDelivery(false)} />}
       {edit && <Modal title="Edit account" onClose={() => setEdit(false)}><AccountForm key={account.data.revision.id} existing={account.data.revision} onDone={() => setEdit(false)} /></Modal>}
       {contact && <Modal title={contact === 'new' ? 'Add contact' : 'Edit contact'} onClose={() => setContact(null)}><ContactForm accountId={id!} existing={contact === 'new' ? undefined : contact} onDone={() => setContact(null)} /></Modal>}
     </>}

@@ -1,6 +1,105 @@
 {
   "indexes": [
     {
+      "collectionGroup": "products", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "belowMinimum", "order": "ASCENDING"},
+        {"fieldPath": "nameKey", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "products", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "hasShortage", "order": "ASCENDING"},
+        {"fieldPath": "nameKey", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "stockMovements", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "productId", "order": "ASCENDING"},
+        {"fieldPath": "productVersion", "order": "DESCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "manufacturingRecords", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "productId", "order": "ASCENDING"},
+        {"fieldPath": "active", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "products",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "modelScopes", "arrayConfig": "CONTAINS"},
+        {"fieldPath": "nameKey", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "active", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "active", "order": "ASCENDING"},
+        {"fieldPath": "accountId", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "accountId", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "active", "order": "ASCENDING"},
+        {"fieldPath": "accountId", "order": "ASCENDING"},
+        {"fieldPath": "machineId", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
+      "collectionGroup": "entities", "queryScope": "COLLECTION",
+      "fields": [
+        {"fieldPath": "kind", "order": "ASCENDING"},
+        {"fieldPath": "conflicted", "order": "ASCENDING"},
+        {"fieldPath": "accountId", "order": "ASCENDING"},
+        {"fieldPath": "machineId", "order": "ASCENDING"},
+        {"fieldPath": "sentOn", "order": "DESCENDING"},
+        {"fieldPath": "entityId", "order": "ASCENDING"}
+      ]
+    },
+    {
       "collectionGroup": "manufacturingRecords",
       "queryScope": "COLLECTION",
       "fields": [

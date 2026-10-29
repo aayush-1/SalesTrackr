@@ -93,6 +93,8 @@ def test_workbook_preserves_every_directory_relationship_and_literal_value(proce
     products = {row["Product key"]: row for row in rows(book, "Products")}
     assert set(products) == {product["id"], unused["id"]}
     assert products[product["id"]]["Part number"] == product["partNumber"]
+    assert products[product["id"]]["Stock quantity"] == 1000
+    assert products[product["id"]]["Minimum stock quantity"] == 0
     assert products[unused["id"]]["Process"] == "No operations"
     assert products[product["id"]]["Operations (in order)"] == "1. Machining\n2. Machining\n3. Machining"
     route = rows(book, "Product operations")
@@ -316,7 +318,9 @@ def test_export_fences_mutations_and_backups_until_verified(process):
 
     with patch.object(LocalSpreadsheetStore, "put", during_export):
         export(client)
-    assert command(client, "/products", {"name": "Can edit after export"})[0].status_code == 200
+    assert command(client, "/products", {
+        "name": "Can edit after export", "stockQuantity": 0, "minimumStockQuantity": 0,
+    })[0].status_code == 200
 
 
 def test_generation_takeover_prevents_stale_worker_upload(process):

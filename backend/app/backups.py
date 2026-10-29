@@ -31,7 +31,10 @@ MAX_EXPANDED = 256 * 1024 * 1024
 IDENTIFIER = re.compile(r"^[a-zA-Z0-9_-]{10,160}$")
 BACKUP_SOURCES = {"manual", "scheduled", "pre-restore", "migration"}
 BACKUP_RETENTION = 10
-BACKUP_FILES = {"account": "accounts.json", "contact": "contacts.json", "record": "sales-records.json"}
+BACKUP_FILES = {
+    "account": "accounts.json", "contact": "contacts.json", "record": "sales-records.json",
+    "model": "models.json", "sent_part": "sent-parts.json",
+}
 
 
 def identifier(value):

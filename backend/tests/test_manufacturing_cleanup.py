@@ -160,7 +160,9 @@ def test_interrupted_cleanup_is_resumable_blocks_mutations_backups_and_restores(
     assert result["activityEventsRemoved"] == current["version"] == result["writeReceiptsRemoved"]
     assert remove(client, body) == result
     assert client.get(PATH).json()["pending"] is None
-    assert command(client, "/products", {"name": "Saving works after cleanup"})[0].status_code == 200
+    assert command(client, "/products", {
+        "name": "Saving works after cleanup", "stockQuantity": 0, "minimumStockQuantity": 0,
+    })[0].status_code == 200
     assert len(client.app.state.recovery.rows()) == 2
 
 

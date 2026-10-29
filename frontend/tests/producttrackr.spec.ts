@@ -8,6 +8,10 @@ async function create(page: Page, kind: string, name: string, extra: () => Promi
   await page.getByRole('button', { name: `New ${singular}`, exact: true }).click();
   const form = page.getByRole('dialog');
   await form.getByLabel(`${singular === 'contact' ? 'Contact' : singular[0].toUpperCase() + singular.slice(1)} name`, { exact: true }).fill(name);
+  if (kind === 'products') {
+    await form.getByLabel('Stock quantity *', { exact: true }).fill('1000');
+    await form.getByLabel('Minimum stock quantity *', { exact: true }).fill('0');
+  }
   await extra();
   await form.getByRole('button', { name: `Create ${singular}`, exact: true }).click();
   await expect(form).toHaveCount(0);
@@ -155,6 +159,8 @@ test('a lost save response retries the same write without duplicating a product'
   await page.goto('/manufacturing/products');
   await page.getByRole('button', { name: 'New product', exact: true }).click();
   await page.getByLabel('Product name', { exact: true }).fill('Retry-safe component');
+  await page.getByLabel('Stock quantity *', { exact: true }).fill('0');
+  await page.getByLabel('Minimum stock quantity *', { exact: true }).fill('0');
   await page.getByRole('button', { name: 'Create product', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('retry the same change');
   await expect(page.getByLabel('Product name', { exact: true })).toBeDisabled();

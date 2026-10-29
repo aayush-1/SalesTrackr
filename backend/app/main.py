@@ -19,6 +19,7 @@ from .demo import seed
 from .domain import (
     MODELS,
     AccountData,
+    AccountFields,
     ContactData,
     DiscardChange,
     FeedbackChange,
@@ -34,7 +35,6 @@ from .domain import (
     Resolution,
     Revision,
     StageChange,
-    StockChange,
     Write,
     add_followup,
     discard_record,
@@ -42,13 +42,13 @@ from .domain import (
     now,
     payment_change,
     stage_change,
-    stock_change,
     today,
 )
 from .firestore_storage import FirestoreRepository
 from .manufacturing_api import manufacturing_router
 from .queries import VIEWS, account_matches, account_name_key, matches, query_records
 from .record_cleanup import CleanupWrite, RecordCleanup
+from .sales_parts import sales_parts_router
 from .shared_backups import ManufacturingRecoveryView, SharedBackupManager
 from .storage import DriveBackend, LocalBackend, Repository, digest
 from .timing import save_timing, timed_lock, timed_phase
@@ -176,6 +176,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         }
 
     def validate_references(kind, data):
+        if kind == "record" and data.get("parts") and not indexed:
+            raise Problem("Catalog parts require the shared Firestore workspace.", 503, "parts_unavailable")
         if kind in ("record", "contact"):
             repo.current(data["accountId"], "account")
         if kind == "record" and data.get("contactId"):
@@ -268,6 +270,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                 if duplicates:
                     result["warning"] = "Saved. Another account has the same name; check for duplicates."
             return saved_response(result)
+
+    app.include_router(sales_parts_router(repo, settings, mutate))
 
     @app.get("/healthz")
     def health():
@@ -433,8 +437,11 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             return {"items": rows[offset : offset + limit], "total": len(rows), **metadata()}
 
     @app.post("/api/accounts")
-    def create_account(body: Write[AccountData], request: Request):
-        return mutate("account", body, "create_account", request, lambda _: body.data, create=True)
+    def create_account(body: Write[AccountFields], request: Request):
+        return mutate(
+            "account", body, "create_account", request,
+            lambda _: AccountData(**body.data.model_dump()), create=True,
+        )
 
     @app.get("/api/accounts/matches")
     def matching_accounts(name: str = Query("", max_length=200), exclude: str | None = None):
@@ -450,9 +457,11 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             }
 
     @app.patch("/api/accounts/{entity_id}")
-    def edit_account(entity_id: str, body: Write[AccountData], request: Request):
+    def edit_account(entity_id: str, body: Write[AccountFields], request: Request):
         require_id(entity_id, body.entityId)
-        return mutate("account", body, "edit_account", request, lambda _: body.data)
+        return mutate("account", body, "edit_account", request, lambda old: AccountData.model_validate({
+            **old, **body.data.model_dump(),
+        }))
 
     @app.get("/api/contacts")
     def contacts(accountId: str):
@@ -521,7 +530,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         def transform(_):
             values = body.data.model_dump(exclude={"acquiredOn"})
             return RecordData(
-                **values, workflowVersion=3, stageDates={"new_lead": body.data.acquiredOn or today()}
+                **values, workflowVersion=3, stageDates={"new_lead": body.data.acquiredOn or today()},
+                inventoryTracked=indexed and settings.manufacturing_enabled,
             )
 
         return mutate("record", body, "create_record", request, transform, create=True)
@@ -615,18 +625,6 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
             lambda old: feedback_change(RecordData.model_validate(old), body.data),
         )
 
-    @app.post("/api/records/{entity_id}/stock")
-    def stock(entity_id: str, body: Write[StockChange], request: Request):
-        require_id(entity_id, body.entityId)
-        return mutate(
-            "record",
-            body,
-            "stock_update",
-            request,
-            lambda old: stock_change(RecordData.model_validate(old), body.data),
-        )
-
-
     @app.get("/api/dashboard")
     def dashboard():
         with repo.lock:
@@ -646,6 +644,8 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     @app.post("/api/entities/{kind}/{entity_id}/resolve")
     def resolve(kind: str, entity_id: str, body: Resolution, request: Request):
         require_kind(kind)
+        if kind == "sent_part":
+            raise Problem("Correct delivery history through its manual entry or sales record.")
         with save_timing(kind, "resolve_conflict"), timed_lock(repo.lock):
             if indexed:
                 result = repo.resolve(

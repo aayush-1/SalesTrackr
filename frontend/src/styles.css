@@ -10,6 +10,76 @@
 * {
   box-sizing: border-box;
 }
+.model-choices {
+  border: 1px solid #dce2dc;
+  border-radius: 12px;
+  margin: 18px 0;
+  padding: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+.model-choices label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-choices input {
+  width: auto;
+}
+.machine-panel {
+  margin-top: 20px;
+}
+.parts-editor {
+  display: grid;
+  gap: 14px;
+  margin: 16px 0;
+}
+.parts-editor > .button {
+  justify-self: start;
+}
+.part-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr) minmax(80px, .6fr) 32px;
+  gap: 12px;
+  align-items: end;
+}
+.delivery-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.delivery-sent td {
+  background: #edf7ee;
+}
+.delivery-status {
+  color: #236942;
+  font-weight: 600;
+}
+.delivery-status > svg {
+  vertical-align: middle;
+  margin-right: 5px;
+}
+.delivery-withdrawn td {
+  color: #838c85;
+  background: #f5f5f2;
+}
+@media (max-width: 700px) {
+  .delivery-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .part-line {
+    grid-template-columns: minmax(0, 1fr) 32px;
+  }
+  .part-line .field {
+    grid-column: 1;
+  }
+  .part-line > .icon-button {
+    grid-column: 2;
+    grid-row: 2;
+  }
+}
 body {
   margin: 0;
 }
@@ -1251,10 +1321,10 @@ footer {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.payment-panel,.feedback-panel,.stock-panel {
+.payment-panel,.feedback-panel {
   padding: 24px;
 }
-.payment-panel h2,.feedback-panel h2,.stock-panel h2 {
+.payment-panel h2,.feedback-panel h2 {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -1669,7 +1739,7 @@ th {
     align-items: flex-start;
     flex-direction: column;
   }
-  .details-panel,.payment-panel,.feedback-panel,.stock-panel {
+  .details-panel,.payment-panel,.feedback-panel {
     padding: 20px;
   }
   .form-footer {
@@ -2556,3 +2626,10 @@ th {
     transition: none!important;
   }
 }
+.report-filters {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.model-parts-notes { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
