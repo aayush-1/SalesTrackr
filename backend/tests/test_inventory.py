@@ -246,12 +246,20 @@ def test_new_empty_sale_is_tracked_and_sent_corrections_are_net_and_atomic(inven
 def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(inventory):
     client, _, initial, _ = inventory
     supplier = process(inventory)
+    final_step = step(client, initial, create(client, "operations", name="Final inspection"))
+    response, _ = command(client, f"/steps/{final_step['id']}/assignments", {
+        "supplierId": supplier["id"],
+    }, final_step["version"])
+    assert response.status_code == 200, response.text
     current, _ = job(client, initial)
     response, _ = transition(client, current, "quantity", quantity=6, reason="Planned batch")
     assert response.status_code == 200, response.text
     current = record(client, current["id"])["record"]
     current = apply(client, current, "assign", supplierId=supplier["id"])
+    current = apply(client, current, "complete")
+    assert current["status"] == "ready"
     assert product(inventory)["stockQuantity"] == 10
+    current = apply(client, current, "assign", supplierId=supplier["id"])
     response, body = transition(client, current, "complete")
     assert response.status_code == 200, response.text
     assert command(client, f"/records/{current['id']}/complete", {}, body=body)[0].status_code == 200
@@ -272,6 +280,10 @@ def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(invent
     sent = ordered(inventory, quantity=15)
     advance(client, sent, "dispatched")
     current = record(client, current["id"])["record"]
+    response, _ = transition(client, current, "quantity", quantity=4, reason="Reduce completed output")
+    assert response.status_code == 409
+    assert record(client, current["id"])["record"] == current
+    assert product(inventory)["stockQuantity"] == 3
     response, _ = transition(
         client,
         current,
@@ -289,6 +301,46 @@ def test_manufacturing_final_credit_quantity_correction_and_consumed_undo(invent
     assert product(inventory)["stockQuantity"] == 2
     apply(client, current, "complete")
     assert product(inventory)["stockQuantity"] == 10
+
+
+def test_multi_product_dispatch_is_atomic_and_retries_after_replenishment(inventory):
+    client, settings, initial, _ = inventory
+    other = create(client, "products", name="Second dispatch product",
+                   stockQuantity=10, minimumStockQuantity=0)
+    available, insufficient = sorted((initial, other), key=lambda value: value["id"])
+    row = ordered(inventory, parts=[
+        {"id": uuid4().hex, "productId": available["id"], "quantity": 7},
+        {"id": uuid4().hex, "productId": insufficient["id"], "quantity": 11},
+    ])
+    before = [detail(client, value)["entity"] for value in (available, insufficient)]
+    repo = ManufacturingRepository(settings)
+    source_id = source_key("sale", row["entityId"])
+    source_before = repo.read("inventorySources", source_id)
+    movements_before = len(list(repo.collection("stockMovements").stream()))
+    body = {
+        "writeId": uuid4().hex, "entityId": row["entityId"], "baseRevision": row["id"],
+        "data": {"stage": "dispatched"},
+    }
+    route = f"/api/records/{row['entityId']}/stage"
+    response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "insufficient_stock"
+    assert [detail(client, value)["entity"] for value in (available, insufficient)] == before
+    assert repo.read("inventorySources", source_id) == source_before
+    assert len(list(repo.collection("stockMovements").stream())) == movements_before
+    assert "dispatched" not in client.app.state.repo.current(row["entityId"])["data"]["stageDates"]
+    response, _ = command(client, f"/products/{insufficient['id']}/stock", {
+        "stockQuantity": 11, "minimumStockQuantity": before[1]["minimumStockQuantity"],
+        "reason": "Replenish missing unit",
+    }, before[1]["version"], insufficient["id"])
+    assert response.status_code == 200, response.text
+    response = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert response.status_code == 200, response.text
+    retry = client.post(route, json=body, headers=headers(client.app.state.repo))
+    assert retry.status_code == 200 and retry.json()["revision"] == response.json()["revision"]
+    assert [detail(client, value)["entity"]["stockQuantity"]
+            for value in (available, insufficient)] == [3, 0]
+    assert shortages(client) == []
 
 
 def test_concurrent_dispatch_cannot_oversell(inventory):
