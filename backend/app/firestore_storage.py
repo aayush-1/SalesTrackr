@@ -16,7 +16,15 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from .domain import MODELS, Problem, RecordData, Revision, now, record_stage
-from .queries import VIEWS, account_matches, account_name_key, matches, query_records
+from .queries import (
+    VIEWS,
+    account_city_options,
+    account_filters_match,
+    account_matches,
+    account_name_key,
+    matches,
+    query_records,
+)
 from .storage import digest, encode, history_heads
 from .timing import timed_phase
 
@@ -62,6 +70,10 @@ def projection(revisions, heads=None):
                 name=data["name"], address=data.get("address", ""),
                 nameSort=data["name"].casefold(), nameSearchChars=sorted(set(data["name"].casefold())),
             )
+            if row["kind"] == "account":
+                row.update(
+                    city=data.get("city", ""), state=data.get("state", ""), country=data.get("country", ""),
+                )
     if len(current) == 1 and row["kind"] == "sent_part":
         data = current[0]["data"]
         row.update(
@@ -710,13 +722,15 @@ class FirestoreRepository:
             item["revision"] = self._revision(item["revision"]["id"])
         return result
 
-    def query_accounts(self, search="", offset=0, limit=100):
+    def query_accounts(self, search="", offset=0, limit=100, city="", state=""):
+        search, city, state = search.strip(), city.strip(), state.strip()
         query = self._entities("account")
         if search:
             query = filtered(query, "nameSearchChars", "array_contains", search.casefold()[0])
+        if search or city or state:
             rows = [s.to_dict() for s in query.stream()]
             rows = sorted(
-                (row for row in rows if search.casefold() in row["name"].casefold()),
+                (row for row in rows if account_filters_match(row, search, city, state)),
                 key=lambda row: (row["nameSort"], row["entityId"]),
             )
             total, selected = len(rows), rows[offset:offset + limit]
@@ -725,6 +739,17 @@ class FirestoreRepository:
             total = self._count(query)
             selected = [s.to_dict() for s in query.offset(offset).limit(limit).stream()]
         return {"items": [self._revision(row["heads"][0]) for row in selected], "total": total}
+
+    def query_account_cities(self, country="", state=""):
+        rows = []
+        for snapshot in self._entities("account").stream():
+            row = snapshot.to_dict()
+            if not row.get("city"):
+                continue
+            if "country" not in row:
+                row["country"] = self._revision(row["heads"][0])["data"].get("country", "")
+            rows.append(row)
+        return account_city_options(rows, country, state)
 
     def query_contacts(self, account_id):
         query = filtered(self._entities("contact"), "accountId", "==", account_id)

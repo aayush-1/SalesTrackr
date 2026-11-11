@@ -1,4 +1,4 @@
-"""Downloadable, filtered parts reports."""
+"""Downloadable, filtered account and parts reports."""
 
 import io
 from datetime import date
@@ -118,4 +118,31 @@ def sales_history_pdf(filters, entries):
         "Sales History", [*filters, f"Deliveries: {len(entries)}"],
         ("Delivered", "Account", "Product / Part number", "Machine", "Quantity", "Source", "Status"),
         (0.10, 0.17, 0.22, 0.20, 0.08, 0.13, 0.10), values, wide=True, empty="No deliveries found.",
+    )
+
+
+def accounts_pdf(filters, accounts, contacts):
+    values = []
+    for account in accounts:
+        data = account["data"]
+        address = "\n".join(filter(None, [
+            data.get("address"),
+            ", ".join(filter(None, [data.get("city"), data.get("state"), data.get("country")])),
+        ]))
+        people = sorted(
+            contacts.get(account["entityId"], []),
+            key=lambda contact: (contact["data"]["name"].casefold(), contact["entityId"]),
+        )
+        contact_details = []
+        for person in people:
+            contact = person["data"]
+            contact_details.append("\n".join(filter(None, [
+                contact["name"], contact.get("designation"), contact.get("email"), contact.get("phone"),
+            ])))
+        values.append((
+            data["name"], address or "Not added", "\n\n".join(contact_details) or "No contacts added",
+        ))
+    return _report(
+        "Accounts", [*filters, f"Accounts: {len(accounts)}"],
+        ("Company name", "Address", "Contacts"), (0.25, 0.35, 0.40), values, empty="No accounts found.",
     )
