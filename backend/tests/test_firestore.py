@@ -117,7 +117,7 @@ def test_firestore_account_location_filters_and_pdf_use_current_projection(clien
         assert value in text
     assert "Gamma" not in text and "Delta" not in text and "Legacy" not in text
     changed, _ = write(client, repo, "account", {
-        **beta["data"], "city": "Mumbai",
+        "name": beta["data"]["name"], "city": "Mumbai", "state": beta["data"]["state"],
     }, current=beta, route=f"/api/accounts/{beta['entityId']}", method="PATCH")
     assert changed.status_code == 200, changed.text
     assert client.get("/api/accounts", params=filters).json()["total"] == 1
