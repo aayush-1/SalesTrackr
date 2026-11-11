@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pypdf import PdfReader
 
 from backend.app.backups import BACKUP_RETENTION, BackupManager, DriveBackupStore, archive, read_archive
 from backend.app.config import Settings
@@ -71,6 +72,65 @@ def write(client, repo, kind, data, *, current=None, write_id=None, route=None, 
 def account(repo, name="Example"):
     value = raw(data=AccountData(name=name, address="Test city").model_dump(mode="json"))
     return repo.commit(value)["revision"]
+
+
+def test_city_suggestions_read_country_from_older_account_projections():
+    repo = Mock(spec=FirestoreRepository)
+    rows = [
+        {"city": "Pune", "state": "Maharashtra", "country": "India"},
+        {"city": "Foreign City", "state": "Maharashtra", "heads": ["old-projection"]},
+        {"city": "", "state": "", "heads": ["no-city"]},
+    ]
+    repo._entities.return_value.stream.return_value = [Mock(to_dict=Mock(return_value=row)) for row in rows]
+    repo._revision.return_value = {"data": {"country": "Canada"}}
+    assert FirestoreRepository.query_account_cities(repo, "India", "Maharashtra") == ["Pune"]
+    repo._entities.assert_called_once_with("account")
+    repo._revision.assert_called_once_with("old-projection")
+
+
+def test_firestore_account_location_filters_and_pdf_use_current_projection(client, repo):
+    for name, city, state in (
+        ("Alpha", "Pune", "Maharashtra"), ("Beta", "Pune", "Maharashtra"),
+        ("Gamma", "Mumbai", "Maharashtra"), ("Delta", "Pune", "Karnataka"),
+    ):
+        response, _ = write(client, repo, "account", {"name": name, "city": city, "state": state})
+        assert response.status_code == 200, response.text
+    legacy = account(repo, "Legacy")
+    assert client.get(f"/api/entities/account/{legacy['entityId']}").status_code == 200
+    filters = {"search": " a ", "city": " PUNE ", "state": "maha"}
+    result = client.get("/api/accounts", params={**filters, "offset": 1, "limit": 1}).json()
+    assert result["total"] == 2
+    assert result["items"][0]["data"]["name"] == "Beta"
+    beta = result["items"][0]
+    assert client.get("/api/accounts", params={"city": "Pune"}).json()["total"] == 3
+    assert client.get("/api/accounts", params={"state": "maha"}).json()["total"] == 3
+    write(client, repo, "contact", {
+        "accountId": beta["entityId"], "name": "Report contact",
+        "email": "report@example.test", "phone": "0000000000",
+    })
+    response = client.get("/api/accounts/pdf", params=filters)
+    assert response.status_code == 200, response.text
+    text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(response.content)).pages)
+    for value in (
+        "Alpha", "Beta", "Pune, Maharashtra", "Report contact", "report@example.test", "0000000000",
+    ):
+        assert value in text
+    assert "Gamma" not in text and "Delta" not in text and "Legacy" not in text
+    changed, _ = write(client, repo, "account", {
+        **beta["data"], "city": "Mumbai",
+    }, current=beta, route=f"/api/accounts/{beta['entityId']}", method="PATCH")
+    assert changed.status_code == 200, changed.text
+    assert client.get("/api/accounts", params=filters).json()["total"] == 1
+    from backend.app.parts_pdf import accounts_pdf
+
+    def concurrent_change(*args):
+        content = accounts_pdf(*args)
+        account(repo, "Concurrent account")
+        return content
+
+    with patch("backend.app.parts_pdf.accounts_pdf", side_effect=concurrent_change):
+        stale = client.get("/api/accounts/pdf", params=filters)
+        assert stale.status_code == 409 and stale.json()["error"]["code"] == "report_changed"
 
 
 def test_firestore_account_save_retry_and_stale_edit(client, repo):

@@ -964,9 +964,64 @@ footer {
   font-size: 11px;
   margin-top: 24px;
 }
-.account-search {
-  max-width: 400px;
+.account-filters {
   margin-bottom: 24px;
+}
+.city-picker {
+  position: relative;
+}
+.city-picker input {
+  padding-right: 40px;
+}
+.city-picker-toggle {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  bottom: 4px;
+  width: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 4px;
+  background: transparent;
+  color: #6b7d61;
+}
+.city-picker-toggle:hover {
+  background: #eff5e9;
+}
+.city-picker-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  border: 1px solid #dce2dc;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 6px 20px #1c34221a;
+  overflow: hidden;
+}
+.city-picker-options {
+  max-height: 220px;
+  overflow-y: auto;
+}
+.city-picker-options button {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+  font-size: 12px;
+  color: #243c38;
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+.city-picker-options button[aria-selected=true] {
+  background: #eff5e9;
+  color: #256550;
+}
+.city-picker-menu p {
+  padding: 12px;
+  font-size: 11px;
+  line-height: 1.55;
 }
 .account-duplicate-check:empty {
   display: none;

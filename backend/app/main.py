@@ -46,7 +46,15 @@ from .domain import (
 )
 from .firestore_storage import FirestoreRepository
 from .manufacturing_api import manufacturing_router
-from .queries import VIEWS, account_matches, account_name_key, matches, query_records
+from .queries import (
+    VIEWS,
+    account_city_options,
+    account_filters_match,
+    account_matches,
+    account_name_key,
+    matches,
+    query_records,
+)
 from .record_cleanup import CleanupWrite, RecordCleanup
 from .sales_parts import sales_parts_router
 from .shared_backups import ManufacturingRecoveryView, SharedBackupManager
@@ -430,23 +438,86 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
                     raise Problem("Record not found.", 404, "not_found")
             return {"writeId": uuid4().hex, "entityId": body.entityId or repo.backend.allocate()}
 
+    def account_page(search, city, state, offset, limit):
+        if indexed:
+            return repo.query_accounts(search, offset, limit, city=city, state=state)
+        rows = sorted(
+            (r for r in repo.list("account") if account_filters_match(r["data"], search, city, state)),
+            key=lambda r: (r["data"]["name"].casefold(), r["entityId"]),
+        )
+        return {"items": rows[offset:offset + limit], "total": len(rows)}
+
     @app.get("/api/accounts")
-    def accounts(search: str = "", offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
+    def accounts(
+        search: str = "", city: str = "", state: str = "",
+        offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200),
+    ):
         with repo.lock:
             repo.sync()
-            if indexed:
-                return {**repo.query_accounts(search, offset, limit), **metadata()}
-            rows = sorted(
-                (r for r in repo.list("account") if search.casefold() in r["data"]["name"].casefold()),
-                key=lambda r: r["data"]["name"].casefold(),
+            return {**account_page(search, city, state, offset, limit), **metadata()}
+
+    @app.get("/api/accounts/cities")
+    def saved_account_cities(
+        country: str = Query("", max_length=200), state: str = Query("", max_length=200),
+    ):
+        with repo.lock:
+            repo.sync()
+            cities = (
+                repo.query_account_cities(country, state) if indexed
+                else account_city_options([row["data"] for row in repo.list("account")], country, state)
             )
-            return {"items": rows[offset : offset + limit], "total": len(rows), **metadata()}
+            return {"cities": cities, **metadata()}
+
+    @app.get("/api/accounts/pdf")
+    def accounts_report(search: str = "", city: str = "", state: str = ""):
+        from .parts_pdf import MAX_REPORT_ROWS, accounts_pdf
+
+        with repo.lock:
+            repo.sync(force=True)
+            before = dict(repo.control) if indexed else None
+            if indexed:
+                repo.check_generation(before["generation"])
+            if not metadata()["complete"]:
+                raise Problem(
+                    "Accounts or contacts may be incomplete. Resolve conflicts and refresh before exporting.",
+                    409, "report_incomplete",
+                )
+            result = account_page(search, city, state, 0, MAX_REPORT_ROWS + 1)
+            if result["total"] > MAX_REPORT_ROWS:
+                raise Problem("Too many accounts for one PDF. Narrow the filters.", 413, "report_size")
+            contacts = (
+                {row["entityId"]: repo.query_contacts(row["entityId"]) for row in result["items"]}
+                if indexed else {}
+            )
+            if not indexed:
+                for contact in repo.list("contact"):
+                    contacts.setdefault(contact["data"]["accountId"], []).append(contact)
+            content = accounts_pdf(
+                [f"Company search: {search.strip() or 'All companies'}",
+                 f"City: {city.strip() or 'All cities'}", f"State: {state.strip() or 'All states'}"],
+                result["items"], contacts,
+            )
+            if indexed:
+                after = repo.workspace.get().to_dict()
+                if after.get("maintenance") or any(
+                    before[key] != after[key] for key in ("generation", "sequence", "activeDataset")
+                ):
+                    raise Problem(
+                        "Accounts or contacts changed while preparing the PDF. Download again.",
+                        409, "report_changed",
+                    )
+            return Response(content, media_type="application/pdf", headers={
+                "Content-Disposition": 'attachment; filename="accounts.pdf"',
+            })
 
     @app.post("/api/accounts")
     def create_account(body: Write[AccountFields], request: Request):
+        data = body.data.model_dump()
+        if "country" not in body.data.model_fields_set:
+            data["country"] = "India"
         return mutate(
             "account", body, "create_account", request,
-            lambda _: AccountData(**body.data.model_dump()), create=True,
+            lambda _: AccountData(**data), create=True,
         )
 
     @app.get("/api/accounts/matches")
@@ -465,8 +536,11 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     @app.patch("/api/accounts/{entity_id}")
     def edit_account(entity_id: str, body: Write[AccountFields], request: Request):
         require_id(entity_id, body.entityId)
+        data = body.data.model_dump()
+        if "country" not in body.data.model_fields_set:
+            data.pop("country")
         return mutate("account", body, "edit_account", request, lambda old: AccountData.model_validate({
-            **old, **body.data.model_dump(),
+            **old, **data,
         }))
 
     @app.get("/api/contacts")

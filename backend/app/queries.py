@@ -24,6 +24,30 @@ def account_name_key(name):
     return "".join(character for character in folded if character.isalnum()) or folded.strip()
 
 
+def account_filters_match(data, search="", city="", state=""):
+    return all(
+        term.strip().casefold() in data.get(field, "").casefold()
+        for field, term in (("name", search), ("city", city), ("state", state))
+    )
+
+
+def account_city_options(accounts, country="", state=""):
+    def key(value):
+        return normalize("NFKC", " ".join(value.split())).casefold()
+
+    cities = {}
+    for data in accounts:
+        # Older accounts without a country or state can still supply city suggestions.
+        if any(key(value) and data.get(field) and key(value) != key(data[field])
+               for field, value in (("country", country), ("state", state))):
+            continue
+        city = normalize("NFKC", " ".join(data.get("city", "").split()))
+        if city:
+            previous = cities.get(key(city))
+            cities[key(city)] = min(city, previous) if previous else city
+    return sorted(cities.values(), key=key)
+
+
 def account_matches(revisions, name, exclude=None, limit=5):
     key = account_name_key(name)
     if not key:

@@ -11,7 +11,7 @@ export type Kind = 'account' | 'contact' | 'record' | 'model' | 'sent_part';
 export interface MachineModel { name: string }
 export interface AccountMachine { id: string; name: string; modelId: string; serialNumber?: string; manufacturingYear?: number | null }
 export interface SalePart { id: string; productId: string; machineId: string | null; quantity?: number | null }
-export interface Account { name: string; address: string; taxReference: string; notes: string; machines?: AccountMachine[] }
+export interface Account { name: string; address: string; city?: string; state?: string; country?: string; taxReference: string; notes: string; machines?: AccountMachine[] }
 export interface SentPart {
   accountId: string; accountName: string; productId: string; productName: string; productPartNumber: string;
   machineId: string | null; machineName: string; machineModelId: string | null; machineModelName: string;

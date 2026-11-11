@@ -1,3 +1,4 @@
+import io
 import json
 from datetime import timedelta
 from unittest.mock import patch
@@ -6,6 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from pypdf import PdfReader
 
 from backend.app.config import Settings
 from backend.app.domain import (
@@ -69,6 +71,163 @@ def new_sale(client):
     )
     assert response.status_code == 200, response.text
     return response.json()["revision"]
+
+
+@pytest.mark.parametrize("locations", [
+    {}, {"city": "", "state": ""}, {"city": " \t ", "state": "  "},
+    {"city": "Pune"}, {"state": "Maharashtra"}, {"city": " Pune ", "state": " Maharashtra "},
+])
+def test_account_locations_are_optional_on_create_and_edit(client, locations):
+    response, _ = write(client, "account", {"name": "Optional locations", **locations})
+    assert response.status_code == 200, response.text
+    original = response.json()["revision"]
+    response, _ = write(
+        client, "account", {"name": "Edited optional locations", **locations},
+        f"/api/accounts/{original['entityId']}", original, method="PATCH",
+    )
+    assert response.status_code == 200, response.text
+    for row in (original, response.json()["revision"]):
+        assert row["data"]["city"] == locations.get("city", "").strip()
+        assert row["data"]["state"] == locations.get("state", "").strip()
+
+
+@pytest.mark.parametrize("field", ["city", "state", "country"])
+def test_account_location_length_is_limited(client, field):
+    response, _ = write(client, "account", {"name": "Long location", field: "x" * 201})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("location,expected", [
+    ({}, "India"), ({"country": " Canada "}, "Canada"), ({"country": ""}, ""),
+])
+def test_new_account_country_defaults_to_india_but_can_be_changed_or_cleared(client, location, expected):
+    response, _ = write(client, "account", {"name": "Country example", **location})
+    assert response.status_code == 200, response.text
+    original = response.json()["revision"]
+    assert original["data"]["country"] == expected
+    response, _ = write(
+        client, "account", {"name": "Country example edited"},
+        f"/api/accounts/{original['entityId']}", original, method="PATCH",
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["revision"]["data"]["country"] == expected
+    updated = response.json()["revision"]
+    cleared, _ = write(
+        client, "account", {"name": "Country example edited", "country": ""},
+        f"/api/accounts/{updated['entityId']}", updated, method="PATCH",
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["revision"]["data"]["country"] == ""
+
+
+def test_editing_legacy_account_does_not_assign_a_country(client):
+    repo = client.app.state.repo
+    legacy = revision("account", uuid4().hex, {
+        "name": "Legacy country not recorded", "address": "Old office", "notes": "", "taxReference": "",
+    })
+    repo.commit(legacy)
+    edited, _ = write(
+        client, "account", {"name": "Legacy country not recorded", "notes": "Updated notes"},
+        f"/api/accounts/{legacy['entityId']}", legacy, method="PATCH",
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["revision"]["data"]["country"] == ""
+
+
+def test_saved_city_suggestions_deduplicate_and_scope_existing_locations(client):
+    for name, city, state, country in (
+        ("City alpha", "Pune", "Maharashtra", "India"),
+        ("City beta", " pune ", "maharashtra", "india"),
+        ("City gamma", "New  Delhi", "Delhi", "India"),
+        ("City delta", "Toronto", "Ontario", "Canada"),
+        ("City epsilon", "Ahmedabad", "Gujarat", "India"),
+        ("City legacy", "Legacy City", "Maharashtra", ""),
+        ("City not recorded", "", "", "India"),
+    ):
+        response, _ = write(client, "account", {
+            "name": name, "city": city, "state": state, "country": country,
+        })
+        assert response.status_code == 200
+    assert client.get("/api/accounts/cities").json()["cities"] == [
+        "Ahmedabad", "Legacy City", "New Delhi", "Pune", "Toronto",
+    ]
+    assert client.get("/api/accounts/cities", params={
+        "country": " INDIA ", "state": " maharashtra ",
+    }).json()["cities"] == ["Legacy City", "Pune"]
+    assert client.get("/api/accounts/cities", params={
+        "country": "Canada", "state": "Ontario",
+    }).json()["cities"] == ["Toronto"]
+    assert client.get("/api/accounts/cities", params={"state": "Unknown"}).json()["cities"] == []
+
+
+def test_account_filters_apply_before_pagination_and_keep_legacy_accounts_readable(client):
+    for name, city, state in (
+        ("Alpha", " Pune ", " Maharashtra "), ("Beta", "Pune", "Maharashtra"),
+        ("Gamma", "Mumbai", "Maharashtra"), ("Delta", "Pune", "Karnataka"),
+    ):
+        response, _ = write(client, "account", {"name": name, "city": city, "state": state})
+        assert response.status_code == 200
+    repo = client.app.state.repo
+    legacy = revision("account", uuid4().hex, {
+        "name": "Legacy address only", "address": "Old office", "notes": "", "taxReference": "",
+    })
+    repo.commit(legacy)
+    assert client.get("/api/accounts").json()["total"] == 5
+    assert client.get(f"/api/entities/account/{legacy['entityId']}").status_code == 200
+    assert client.get("/api/accounts", params={"city": "PUNE"}).json()["total"] == 3
+    assert client.get("/api/accounts", params={"state": "maha"}).json()["total"] == 3
+    filters = {"search": " a ", "city": " pune ", "state": "MAHARASHTRA", "offset": 1, "limit": 1}
+    page = client.get("/api/accounts", params=filters).json()
+    assert page["total"] == 2 and [row["data"]["name"] for row in page["items"]] == ["Beta"]
+    assert page["items"][0]["data"]["city"] == "Pune"
+    assert client.get("/api/accounts", params={"city": "Unknown"}).json()["total"] == 0
+
+
+def test_accounts_pdf_exports_all_filtered_pages_and_contacts_without_truncating(client):
+    accounts = []
+    for number in range(26):
+        response, _ = write(client, "account", {
+            "name": f"Report customer {number:02}", "city": "Pune", "state": "Maharashtra",
+            "address": "Unit <A> & office\nIndustrial Road",
+        })
+        accounts.append(response.json()["revision"])
+    write(client, "account", {"name": "Excluded city", "city": "Mumbai", "state": "Maharashtra"})
+    write(client, "account", {"name": "Excluded state", "city": "Pune", "state": "Karnataka"})
+    write(client, "account", {"name": "Excluded company", "city": "Pune", "state": "Maharashtra"})
+    for name, email, phone in (
+        ("Asha <Sales>", "asha@example.test", "+91 0000000001"),
+        ("Zoya", "zoya@example.test", "+91 0000000002"),
+    ):
+        response, _ = write(client, "contact", {
+            "accountId": accounts[-1]["entityId"], "name": name,
+            "designation": "Sales & service", "email": email, "phone": phone,
+        })
+        assert response.status_code == 200
+    filters = {"search": "report", "city": "PUNE", "state": "maharashtra"}
+    assert len(client.get("/api/accounts", params={**filters, "limit": 24}).json()["items"]) == 24
+    response = client.get("/api/accounts/pdf", params=filters)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert 'filename="accounts.pdf"' in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+    pages = PdfReader(io.BytesIO(response.content)).pages
+    assert len(pages) > 1
+    text = "\n".join(page.extract_text() for page in pages)
+    for account in accounts:
+        assert account["data"]["name"] in text
+    for value in ("Unit <A> & office", "Industrial Road", "Pune, Maharashtra, India",
+                  "Asha <Sales>", "asha@example.test", "+91 0000000001", "Zoya",
+                  "zoya@example.test", "+91 0000000002", "Sales & service", "No contacts added"):
+        assert value in text
+    assert "Excluded" not in text
+    empty = client.get("/api/accounts/pdf", params={"city": "Unknown"})
+    assert "No accounts found." in PdfReader(io.BytesIO(empty.content)).pages[0].extract_text()
+    with patch("backend.app.parts_pdf.MAX_REPORT_ROWS", 1):
+        too_large = client.get("/api/accounts/pdf", params=filters)
+        assert too_large.status_code == 413 and too_large.json()["error"]["code"] == "report_size"
+    with patch.object(client.app.state.repo, "conflicts", return_value=[{}]):
+        incomplete = client.get("/api/accounts/pdf")
+        assert incomplete.status_code == 409 and incomplete.json()["error"]["code"] == "report_incomplete"
 
 
 def advance(client, revision, stage, **extra):

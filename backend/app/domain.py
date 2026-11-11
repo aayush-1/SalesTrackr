@@ -86,6 +86,9 @@ class AccountMachine(Model):
 
 class AccountFields(Model):
     name: Name
+    city: Annotated[str, StringConstraints(max_length=200)] = ""
+    state: Annotated[str, StringConstraints(max_length=200)] = ""
+    country: Annotated[str, StringConstraints(max_length=200)] = ""
     address: Text = ""
     taxReference: Annotated[str, StringConstraints(max_length=100)] = ""
     notes: Text = ""
