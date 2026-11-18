@@ -15,6 +15,40 @@ async function downloadReport(page: Page, endpoint: string, filename: string, fi
   expect((await readFile(file)).subarray(0, 5).toString()).toBe('%PDF-');
 }
 
+test('sales product choices use natural part-number order across catalog pages', async ({ page }) => {
+  const products = [
+    { id: 'ten', name: 'Alpha rotor', partNumber: 'P-10' },
+    { id: 'three', name: 'Beta belt', partNumber: 'p-3' },
+    { id: 'two', name: 'Gamma gear', partNumber: 'P-2' },
+    { id: 'one', name: 'Omega spring', partNumber: 'P-1' },
+    { id: 'blank', name: 'Unnumbered washer', partNumber: '' },
+    { id: 'legacy', name: 'Another unnumbered part' },
+  ];
+  await page.route('**/api/parts/catalog?**', route => {
+    const offset = Number(new URL(route.request().url()).searchParams.get('offset'));
+    return route.fulfill({ json: { items: products.slice(offset, offset + 3), total: products.length } });
+  });
+  const company = `Product order customer ${Date.now()}`;
+  await page.goto('/accounts/new');
+  await page.getByLabel('Company name *', { exact: true }).fill(company);
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  await expect(page.getByRole('heading', { name: company, exact: true })).toBeVisible();
+  const accountId = page.url().split('/').at(-1)!;
+  await page.goto(`/records/new?accountId=${accountId}`);
+  await page.getByRole('button', { name: 'Add part', exact: true }).click();
+  const product = page.getByLabel('Product 1 *', { exact: true });
+  const labels = [
+    'Select a product', 'P-1 - Omega spring', 'P-2 - Gamma gear', 'p-3 - Beta belt',
+    'P-10 - Alpha rotor', 'Another unnumbered part', 'Unnumbered washer',
+  ];
+  await expect(product.locator('option')).toHaveText(labels);
+  await product.selectOption('two');
+  await page.getByLabel('Quantity 1 *', { exact: true }).fill('5');
+  await page.getByRole('button', { name: 'Add part', exact: true }).click();
+  await expect(product).toHaveValue('two');
+  await expect(page.getByLabel('Product 2 *', { exact: true }).locator('option')).toHaveText(labels);
+});
+
 test('models, repeated machines, sales corrections, manual deliveries and machine coverage', async ({ page, request }) => {
   test.setTimeout(180_000);
   const suffix = Date.now().toString();

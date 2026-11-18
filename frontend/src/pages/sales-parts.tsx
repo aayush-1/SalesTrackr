@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from 'react';
+import { useContext, useEffect, useMemo, useState } from 'react';
 import { Check, Download, History, Pencil, Plus, Trash2 } from 'lucide-react';
 import { Link, useOutletContext, useSearchParams } from 'react-router-dom';
 import { api, RefreshContext, usePdfDownload, useResource, useSave } from '../api';
@@ -39,6 +39,7 @@ export function useDirectory<T>(path: string | null) {
 export const machineLabel = (machine: AccountMachine) => `${machine.name}${machine.serialNumber ? ` - ${machine.serialNumber}` : ''}`;
 const compatible = (product: Product, machine?: AccountMachine) => !machine || !product.modelIds?.length || product.modelIds.includes(machine.modelId);
 const newId = () => crypto.randomUUID().replaceAll('-', '');
+const productOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
 
 export function ModelsPage() {
   const models = useDirectory<Revision<MachineModel>>('/models');
@@ -94,6 +95,10 @@ function MachineEditor({ account, machine, models, close }: { account: Revision<
 export function PartLines({ accountId, parts, onChange, quantityRequired = true }: { accountId: string; parts: SalePart[]; onChange: (parts: SalePart[]) => void; quantityRequired?: boolean }) {
   const account = useResource<Detail<Account>>(accountId ? `/entities/account/${accountId}` : null);
   const products = useDirectory<Product>('/parts/catalog');
+  const sortedProducts = useMemo(() => [...products.items].sort((a, b) =>
+    Number(!a.partNumber) - Number(!b.partNumber) ||
+    productOrder.compare(a.partNumber || '', b.partNumber || '') || productOrder.compare(a.name, b.name),
+  ), [products.items]);
   const machines = account.data?.revision.data.machines || [];
   const update = (index: number, patch: Partial<SalePart>) => onChange(parts.map((part, i) => i === index ? { ...part, ...patch } : part));
   return <div className="parts-editor">{(products.error || account.error) && <Alert>{products.error || account.error}</Alert>}
@@ -105,7 +110,7 @@ export function PartLines({ accountId, parts, onChange, quantityRequired = true 
         update(index, { machineId: event.target.value || null, ...(current && !compatible(current, machine) ? { productId: '' } : {}) });
       }}><option value="">Machine not specified</option>{machines.map(machine => <option key={machine.id} value={machine.id}>{machineLabel(machine)}</option>)}</select></Field>
         <Field label={`Product ${index + 1} *`}><select required value={part.productId} disabled={products.loading} onChange={event => update(index, { productId: event.target.value })}><option value="">Select a product</option>
-          {products.items.filter(product => compatible(product, selected) || product.id === part.productId).map(product => <option value={product.id} key={product.id}>{product.partNumber ? `${product.partNumber} - ` : ''}{product.name}</option>)}
+          {sortedProducts.filter(product => compatible(product, selected) || product.id === part.productId).map(product => <option value={product.id} key={product.id}>{product.partNumber ? `${product.partNumber} - ` : ''}{product.name}</option>)}
         </select></Field><Field label={`Quantity ${index + 1}${quantityRequired ? ' *' : ''}`}><input type="number" min={1} max={10 ** 12} step={1} required={quantityRequired} value={part.quantity ?? ''} onChange={event => update(index, { quantity: event.target.value === '' ? null : Number(event.target.value) })} /></Field>
         <button type="button" className="icon-button" aria-label={`Remove part ${index + 1}`} onClick={event => { if (event.currentTarget.form) event.currentTarget.form.dataset.dirty = 'true'; onChange(parts.filter((_, i) => i !== index)); }}><Trash2 size={17} /></button></div>;
     })}
