@@ -259,9 +259,11 @@ test('create account and record, progress, pay, close, filter and retain history
   await expect(page.locator('.payment-panel .badge')).toHaveText('Pending');
   await expect(page.locator('.payment-panel')).not.toContainText(/amount|INR|₹|part-paid/i);
   await expect(page.locator('.stages .reached')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: 'Received', exact: true })).toBeEnabled();
   await page.goto('/view/pending');
   await page.getByLabel('Search', { exact: true }).fill(account);
-  await expect(page.locator('tbody tr')).toHaveCount(1);
+  await expect(page.getByRole('heading', { name: 'Nothing in this view' })).toBeVisible();
+  await expect(page.locator('tbody tr')).toHaveCount(0);
   await expect(page.getByRole('columnheader', { name: /Payment|Pending|Amount/ })).toHaveCount(0);
   await page.goto(recordUrl);
   await expect(page.getByRole('button', { name: 'Dispatched', exact: true })).toBeEnabled();
@@ -270,6 +272,11 @@ test('create account and record, progress, pay, close, filter and retain history
     await page.getByRole('button', { name: 'Mark stage reached' }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.locator('.stages .current strong')).toHaveText(next);
+    await page.goto('/view/pending');
+    await page.getByLabel('Search', { exact: true }).fill(account);
+    await expect(page.locator('tbody tr')).toHaveCount(1);
+    await expect(page.locator('tbody .badge')).toHaveText(next);
+    await page.goto(recordUrl);
   }
   await expect(page.getByRole('button', { name: 'Closed', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Feedback received', exact: true })).toBeDisabled();
@@ -363,6 +370,37 @@ test('create account and record, progress, pay, close, filter and retain history
   await page.goto('/view/pending');
   await page.getByLabel('Search', { exact: true }).fill(account);
   await expect(page.getByRole('heading', { name: 'Nothing in this view' })).toBeVisible();
+});
+
+test('payment can be received at Order in hand without advancing the sales stage', async ({ page }) => {
+  const notes = `Early payment example ${Date.now()}`;
+  await page.goto('/records/new');
+  const accounts = page.getByLabel('Account *', { exact: true });
+  await expect(accounts.locator('option')).not.toHaveCount(1);
+  await accounts.selectOption({ index: 1 });
+  await page.getByLabel('Product / requirement notes').fill(notes);
+  await page.getByRole('button', { name: 'Create sales record', exact: true }).click();
+  await expect(page.locator('.stages .current strong')).toHaveText('New lead');
+  for (const stage of ['Follow-up', 'Order in hand']) {
+    await page.getByRole('button', { name: stage, exact: true }).click();
+    await page.getByRole('button', { name: 'Mark stage reached' }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.locator('.stages .current strong')).toHaveText(stage);
+  }
+  await page.getByRole('button', { name: 'Received', exact: true }).click();
+  await expect(page.locator('.payment-panel .badge')).toHaveText('Received');
+  await expect(page.locator('.stages .current strong')).toHaveText('Order in hand');
+  await expect(page.getByRole('button', { name: 'Dispatched', exact: true })).toBeEnabled();
+  await page.reload();
+  await expect(page.locator('.payment-panel .badge')).toHaveText('Received');
+  await expect(page.locator('.stages .current strong')).toHaveText('Order in hand');
+  for (const [view, count] of [['pending', 0], ['paid', 1], ['orders', 1]] as const) {
+    await page.goto(`/view/${view}`);
+    await page.getByLabel('Search', { exact: true }).fill(notes);
+    await expect(page.locator('.table-caption strong')).toHaveText(String(count));
+    await expect(page.locator('tbody tr')).toHaveCount(count);
+    if (count) await expect(page.locator('tbody .badge')).toHaveText('Order in hand');
+  }
 });
 
 test('move directly to follow-up without a quotation and add or clear it later', async ({ page }) => {
@@ -594,7 +632,7 @@ test('acquisition sorting, focused product editing and discarding retain the sav
   expect(discarded.data).toEqual({ ...before.data, discarded: true, discardNote: 'Customer withdrew the enquiry.', discardedOn: me.today });
   const countsAfter = (await (await page.request.get('/api/dashboard')).json()).counts;
   expect(countsAfter.orders).toBe(countsBefore.orders - 1);
-  expect(countsAfter.pending).toBe(countsBefore.pending - 1);
+  expect(countsAfter.pending).toBe(countsBefore.pending);
   expect(countsAfter.discarded).toBe(countsBefore.discarded + 1);
   expect(countsAfter.all).toBe(countsBefore.all);
   const history = (await (await page.request.get(`/api/entities/record/${id}/history`)).json()).items;
