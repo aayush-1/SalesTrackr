@@ -17,7 +17,7 @@ from pypdf import PdfReader
 from backend.app.backups import BACKUP_RETENTION, BackupManager, DriveBackupStore, archive, read_archive
 from backend.app.config import Settings
 from backend.app.domain import STAGES, AccountData, ContactData, Problem, RecordData, Revision, now, today
-from backend.app.firestore_storage import FirestoreRepository
+from backend.app.firestore_storage import VIEW_VERSION, FirestoreRepository, bucket
 from backend.app.main import create_app
 from backend.app.queries import VIEWS, query_records
 from backend.app.record_cleanup import RecordCleanup
@@ -243,6 +243,52 @@ def test_retired_stock_view_backfill_resumes_concurrently_without_rewriting_hist
     with patch.object(repo, "_revision", side_effect=AssertionError("Index already upgraded")):
         repo.sync()
     assert repo.workspace.get().to_dict() == after
+
+
+def test_payment_pending_index_upgrade_excludes_orders_without_rewriting_history(client, repo):
+    owner = account(repo)
+    rows = []
+    for stage_index, paid, discarded in (
+        (2, False, False), (3, False, False), (4, False, False),
+        (3, True, False), (4, False, True), (5, True, False),
+    ):
+        data = RecordData(
+            accountId=owner["entityId"], workflowVersion=3,
+            stageDates={stage: today() for stage in STAGES[:stage_index + 1]},
+            paymentReceived=paid, paymentReceivedOn=today() if paid else None,
+            discarded=discarded, discardNote="Synthetic discarded record" if discarded else "",
+            discardedOn=today() if discarded else None,
+        ).model_dump(mode="json")
+        rows.append(repo.commit(raw("record", data=data))["revision"])
+    before, control = repo.snapshot()
+    for row in rows:
+        ref = repo.namespace.collection("entities").document(row["entityId"])
+        old = ref.get().to_dict()
+        old["viewVersion"] = 3
+        if row == rows[0]:
+            old["views"].append("pending")
+            old["buckets"].extend(
+                bucket("pending", account_id, stage)
+                for account_id in (None, owner["entityId"]) for stage in (None, "order_received")
+            )
+        ref.set(old)
+    repo.workspace.update({
+        "viewIndex": {"dataset": control["activeDataset"], "version": 3, "sequence": control["sequence"]},
+        "dashboard": {**control["dashboard"], "pending": 3},
+    })
+
+    counts = client.get("/api/dashboard").json()["counts"]
+    pending = client.get("/api/records?view=pending").json()
+    assert counts["pending"] == pending["total"] == 2
+    assert {row["entityId"] for row in pending["items"]} == {row["entityId"] for row in rows[1:3]}
+    assert client.get("/api/records?view=pending&stage=order_received").json()["total"] == 0
+    assert counts["orders"] == 1 and counts["paid"] == 2 and counts["discarded"] == 1
+    upgraded = repo.namespace.collection("entities").document(rows[0]["entityId"]).get().to_dict()
+    assert upgraded["viewVersion"] == VIEW_VERSION
+    assert not any(key.startswith("record|pending|") for key in upgraded["buckets"])
+    assert repo.snapshot()[0] == before
+    assert repo.control["sequence"] == control["sequence"]
+    assert repo.generation == control["generation"]
 
 
 def test_retired_stock_view_backfill_is_fenced_against_a_dataset_switch(repo):

@@ -128,7 +128,7 @@ Every date/day/month/range selection uses **Lead acquired date**. The selected g
 | Order in Hand | Current status is Order in hand only |
 | Dispatched | Current status is Dispatched only |
 | Delivered | Current status is Delivered only |
-| Payment Pending | Confirmed orders without receipt confirmation, including delivered orders |
+| Payment Pending | Current status is Dispatched or Delivered, without receipt confirmation; excludes Order in hand |
 | Payment Received | Records with payment receipt confirmed |
 | Closed | Current status is Closed only |
 | Discarded | Records with the discarded flag, showing the discard remark/date and their last reached stage |

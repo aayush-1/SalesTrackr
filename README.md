@@ -15,7 +15,7 @@ A private sales workspace: one customer account, one record per enquiry, and a d
 - Product stock and minimum quantities, quantity-bearing sales parts, and an **Order in hand shortage** report combining demand before Dispatch.
 - ProductTrackr **Low stock**, audited manual stock editing, and manufacturing quantities credited when the entire job completes.
 - **Feedback pending** lists closed, non-discarded records whose feedback is not yet received, including existing closed records. Confirming feedback removes a record from this view without changing its Closed stage or payment state.
-- Stage tabs show only the current status: **New leads**, **Follow-ups**, **Order in hand**, **Dispatched**, **Delivered**, and **Closed**. Payment pending and Payment received remain separate views.
+- Stage tabs show only the current status: **New leads**, **Follow-ups**, **Order in hand**, **Dispatched**, **Delivered**, and **Closed**. Payment pending includes only unpaid Dispatched/Delivered sales, not Order in hand; Payment received remains a separate view.
 - **Lead acquired date** filters by day/month/range in every view, showing those leads' current progress today. **Current sales stage** lists only relevant stages and is hidden on single-stage tabs.
 - Sales tables are ordered by **lead-acquired date, newest first**, with a visible descending indicator. Note edits and stage changes do not reorder them by last-update time.
 - **Discard record** works at any stage, including Closed, and requires a remark. Discarded records become read-only and remain in **Discarded** and **All sales records**, but leave stage/payment queues and their counts. The discard date, remark, original stage/payment state, and history are retained; nothing is deleted.

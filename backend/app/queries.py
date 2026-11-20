@@ -101,7 +101,7 @@ def matches(data, view):
         "dispatched": stage == "dispatched",
         "delivered": stage == "delivered",
         "closed": stage == "closed",
-        "pending": "order_received" in data["stageDates"] and not data["paymentReceived"],
+        "pending": stage in ("dispatched", "delivered") and not data["paymentReceived"],
         "paid": data["paymentReceived"],
         "feedback-pending": stage == "closed" and not data.get("feedbackReceived", False),
         "followups": stage == "follow_up",
