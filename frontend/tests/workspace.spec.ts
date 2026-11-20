@@ -187,7 +187,17 @@ test('sample workspace and mobile navigation', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'A clear view of your sales.' })).toBeVisible();
   await expect(page.locator('.stats')).toBeVisible();
   await expect(page.locator('.loading')).toHaveCount(0);
+  const counts = (await (await page.request.get('/api/dashboard')).json()).counts;
+  const pendingCard = page.locator('.stat-card').filter({ hasText: 'Payment pending' });
+  await expect(pendingCard.locator('strong')).toHaveText(String(counts.pending));
+  await expect(pendingCard).toContainText('Dispatched or delivered sales');
+  await expect(page.getByText('PAYMENT CONFIRMATION', { exact: true })).toHaveCount(0);
+  await expect(page.locator('main a[href="/view/pending"]')).toHaveCount(1);
   await page.screenshot({ path: 'test-results/overview.png', fullPage: true });
+  await pendingCard.click();
+  await expect(page.getByRole('heading', { name: 'Payment pending', exact: true })).toBeVisible();
+  await expect(page.locator('.table-caption strong')).toHaveText(String(counts.pending));
+  await expect(page.locator('tbody .badge:not(.stage-dispatched):not(.stage-delivered)')).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Open navigation' }).click();
   await page.getByRole('navigation').getByRole('link', { name: 'Order in hand' }).click();
@@ -417,7 +427,7 @@ test('sales filters use acquisition dates and only relevant current stages', asy
     expect(dates).toEqual([...dates].sort().reverse());
   }
   const scopedViews = [
-    ['pending', ['All stages in this view', 'Order in hand', 'Dispatched', 'Delivered']],
+    ['pending', ['All stages in this view', 'Dispatched', 'Delivered']],
     ['paid', ['All stages in this view', 'Order in hand', 'Dispatched', 'Delivered', 'Closed']],
   ] as const;
   for (const [view, options] of scopedViews) {

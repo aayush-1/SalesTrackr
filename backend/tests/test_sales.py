@@ -438,7 +438,7 @@ def test_full_journey_and_independent_payment(client):
         row = advance(client, row, stage)
     orders = client.get("/api/records?view=orders").json()
     assert orders["total"] == 1
-    assert client.get("/api/records?view=pending").json()["total"] == 1
+    assert client.get("/api/records?view=pending").json()["total"] == 0
     assert "pendingPaise" not in client.get("/api/dashboard").json()
     response, _ = write(client, "record", {"received": True}, f"/api/records/{row['entityId']}/payment", row)
     assert response.status_code == 200, response.text
@@ -892,7 +892,7 @@ def test_stage_tabs_and_dashboard_use_only_current_status(client):
         "dispatched": [3],
         "delivered": [4],
         "closed": [5],
-        "pending": [2, 3, 4],
+        "pending": [3, 4],
         "paid": [5, 6],
         "feedback-pending": [5],
         "discarded": [],
@@ -1319,6 +1319,18 @@ def record_at(stage_index=0, paid=False):
         paymentReceived=paid,
         paymentReceivedOn=acquired + timedelta(days=2) if paid else None,
     )
+
+
+@pytest.mark.parametrize("stage_index,paid", [
+    (0, False), (1, False), (2, False), (2, True),
+    (3, False), (3, True), (4, False), (4, True), (5, True),
+])
+@pytest.mark.parametrize("discarded", [False, True])
+def test_payment_pending_only_includes_unpaid_dispatched_and_delivered_sales(stage_index, paid, discarded):
+    data = record_at(stage_index, paid).model_dump(mode="json")
+    data["discarded"] = discarded
+    result = query_records([{"entityId": uuid4().hex, "data": data}], {}, "pending")
+    assert result["total"] == int(stage_index in (3, 4) and not paid and not discarded)
 
 
 @pytest.mark.parametrize("stage_index", range(5))

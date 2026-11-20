@@ -30,7 +30,7 @@ from .timing import timed_phase
 
 CHUNK_SIZE = 512 * 1024
 MAX_PAYLOAD = 256 * 1024 * 1024
-VIEW_VERSION = 3
+VIEW_VERSION = 4
 
 
 def filtered(query, field, operator, value):

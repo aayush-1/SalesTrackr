@@ -1,5 +1,5 @@
 import { useContext, useRef, useState } from 'react';
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, CircleDollarSign, Leaf, MessageSquare, PackageCheck, Plus } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, CircleDollarSign, Leaf, MessageSquare, PackageCheck, Plus } from 'lucide-react';
 import { Link, useOutletContext, useParams } from 'react-router-dom';
 import { api, ApiError, generationHeaders, RefreshContext, useFormWorkspace, useResource } from '../api';
 import { Alert, Completeness, Empty, Field, Loading, PageHeader, RecordTable, SaveButton } from '../components';
@@ -14,7 +14,7 @@ export function DashboardPage() {
     ['leads', 'New leads', Leaf, 'teal', 'New enquiries to follow up'],
     ['followups', 'Follow-ups', MessageSquare, 'orange', 'Sales conversations in progress'],
     ['orders', 'Order in hand', PackageCheck, 'blue', 'Confirmed, awaiting dispatch'],
-    ['pending', 'Payment pending', CircleDollarSign, 'purple', 'Outstanding confirmed orders'],
+    ['pending', 'Payment pending', CircleDollarSign, 'purple', 'Dispatched or delivered sales'],
   ] as const;
   return <>
     <PageHeader eyebrow={me ? formatDate(me.today).toUpperCase() : 'YOUR WORKSPACE'} title="A clear view of your sales."
@@ -26,16 +26,11 @@ export function DashboardPage() {
       <div className="stats">{cards.map(([key, label, Icon, color, hint]) =>
         <Link to={`/view/${key}`} key={key} className="stat-card"><div className="stat-top"><span>{label}</span><div className={`stat-icon ${color}`}><Icon size={20} /></div></div>
           <strong>{data.counts[key]}</strong><div className="stat-bottom">{hint}<ArrowUpRight size={16} /></div></Link>)}</div>
-      <div className="overview-grid">
-        <section className="panel pipeline-panel"><div className="section-heading"><div><div className="eyebrow">AT A GLANCE</div><h2>Your active pipeline</h2></div><Link to="/records">View all <ArrowRight size={15} /></Link></div>
-          <div className="pipeline-summary">{[['leads', 'New leads'], ['followups', 'Follow-ups'], ['orders', 'In hand'], ['dispatched', 'Dispatched'], ['delivered', 'Delivered'], ['closed', 'Closed']].map(([key, label], i) =>
-            <Link to={`/view/${key}`} className="pipeline-step" key={key}><div className={`pipeline-marker step-${i}`} /><strong>{data.counts[key]}</strong><span>{label}</span></Link>)}</div>
-          <div className="panel-note"><span className="online-dot" />Current status counts · all dates · no older work hidden</div>
-        </section>
-        <section className="collection-card"><div className="collection-top"><span>PAYMENT CONFIRMATION</span><ArrowDownLeft size={22} /></div><h2>{data.counts.pending} pending</h2>
-          <p>Confirm receipt to complete your delivered sales.</p>
-          <Link to="/view/pending">Review pending payments <ArrowRight size={17} /></Link></section>
-      </div>
+      <section className="panel pipeline-panel"><div className="section-heading"><div><div className="eyebrow">AT A GLANCE</div><h2>Your active pipeline</h2></div><Link to="/records">View all <ArrowRight size={15} /></Link></div>
+        <div className="pipeline-summary">{[['leads', 'New leads'], ['followups', 'Follow-ups'], ['orders', 'In hand'], ['dispatched', 'Dispatched'], ['delivered', 'Delivered'], ['closed', 'Closed']].map(([key, label], i) =>
+          <Link to={`/view/${key}`} className="pipeline-step" key={key}><div className={`pipeline-marker step-${i}`} /><strong>{data.counts[key]}</strong><span>{label}</span></Link>)}</div>
+        <div className="panel-note"><span className="online-dot" />Current status counts · all dates · no older work hidden</div>
+      </section>
     </>}
     <section className="panel"><div className="section-heading"><div><h2>Latest enquiries</h2><p>A quick look at your most recently acquired leads.</p></div><Link to="/records">All records <ArrowRight size={15} /></Link></div>
       {recent.error && <Alert>{recent.error}</Alert>}

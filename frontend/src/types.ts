@@ -108,7 +108,7 @@ export const views: Record<string, { title: string; description: string; stages:
   dispatched: { title: 'Dispatched', description: 'Only records currently dispatched and awaiting delivery.', stages: ['dispatched'] },
   delivered: { title: 'Delivered', description: 'Only records currently delivered, not yet closed.', stages: ['delivered'] },
   closed: { title: 'Closed', description: 'Delivered, payment received, and complete.', stages: ['closed'] },
-  pending: { title: 'Payment pending', description: 'All outstanding confirmed orders, including older and delivered orders.', stages: stages.slice(2, 5) },
+  pending: { title: 'Payment pending', description: 'Dispatched and delivered sales awaiting payment receipt confirmation, across all dates.', stages: ['dispatched', 'delivered'] },
   paid: { title: 'Payment received', description: 'Orders with payment receipt confirmed.', stages: stages.slice(2) },
   'feedback-pending': { title: 'Feedback pending', description: 'Closed sales records awaiting feedback. Confirm feedback receipt on the record to remove it from this list.', stages: ['closed'] },
   discarded: { title: 'Discarded', description: 'Records set aside with a remark. Original stages and history are retained.', stages },
