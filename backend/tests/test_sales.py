@@ -238,6 +238,66 @@ def advance(client, revision, stage, **extra):
     return response.json()["revision"]
 
 
+def test_orders_pdf_matches_filters_and_exports_all_pages_in_acquired_order(client):
+    repo = client.app.state.repo
+    response, _ = write(client, "account", {"name": "PDF customer", "address": "Unit <A> & office"})
+    owner = response.json()["revision"]["entityId"]
+
+    def add(notes, acquired="2020-01-01", stage_index=2, **extra):
+        data = RecordData(
+            accountId=owner, productNotes=notes,
+            stageDates={stage: acquired for stage in STAGES[:stage_index + 1]}, **extra,
+        ).model_dump(mode="json")
+        return repo.commit(revision("record", uuid4().hex, data))
+
+    for index in range(26):
+        add(f"Compact order {index:02}", f"2020-01-{index + 1:02}")
+    add("Compact excluded date", "2020-02-01")
+    add("Compact excluded lead", stage_index=0)
+    add("Compact excluded dispatch", stage_index=3)
+    add("Compact excluded discard", discarded=True, discardedOn="2020-01-01", discardNote="Duplicate")
+    add("Other product")
+    filters = {"search": "Compact", "start": "2020-01-01", "end": "2020-02-01", "accountId": owner}
+    listing = client.get("/api/records", params={**filters, "view": "orders", "limit": 25}).json()
+    assert listing["total"] == 26 and len(listing["items"]) == 25
+    response = client.get("/api/records/orders/pdf", params={**filters, "offset": 25, "limit": 1})
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert 'filename="order-in-hand.pdf"' in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+    pages = PdfReader(io.BytesIO(response.content)).pages
+    text = "\n".join(page.extract_text() for page in pages)
+    assert len(pages) == 2
+    assert "PDF customer" in text and "Unit <A> & office" in text and "Records: 26" in text
+    positions = [text.index(f"Compact order {index:02}") for index in reversed(range(26))]
+    assert positions == sorted(positions)
+    assert "excluded" not in text and "Other product" not in text
+    assert all("Product / requirement" in page.extract_text() for page in pages)
+    assert client.get("/api/records/orders/pdf", params={"start": "2020-02-01", "end": "2020-01-01"}
+                      ).status_code == 422
+    empty = client.get("/api/records/orders/pdf", params={"search": "No matching order"})
+    assert "No orders found." in PdfReader(io.BytesIO(empty.content)).pages[0].extract_text()
+    with patch("backend.app.parts_pdf.MAX_REPORT_ROWS", 1):
+        assert client.get("/api/records/orders/pdf").status_code == 413
+    with patch.object(repo, "conflicts", return_value=[{}]):
+        incomplete = client.get("/api/records/orders/pdf")
+        assert incomplete.status_code == 409 and incomplete.json()["error"]["code"] == "report_incomplete"
+
+
+def test_compact_pdf_fits_forty_readable_product_rows_on_one_sheet():
+    from backend.app.parts_pdf import model_parts_pdf
+
+    products = [
+        {"name": f"Compact product {index:02}", "partNumber": f"P-{index:02}",
+         "modelIds": ["model"], "notes": "A readable description"}
+        for index in range(40)
+    ]
+    pages = PdfReader(io.BytesIO(model_parts_pdf("Example model", products))).pages
+    assert len(pages) == 1
+    text = pages[0].extract_text()
+    assert all(product["name"] in text for product in products)
+
+
 
 
 @pytest.mark.parametrize("name", [

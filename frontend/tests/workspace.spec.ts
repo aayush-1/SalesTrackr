@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 async function reviewCompanyMatches(page: Page) {
   await expect(page.getByText('Checking for existing accounts...', { exact: true })).toHaveCount(0);
@@ -394,13 +395,72 @@ test('payment can be received at Order in hand without advancing the sales stage
   await page.reload();
   await expect(page.locator('.payment-panel .badge')).toHaveText('Received');
   await expect(page.locator('.stages .current strong')).toHaveText('Order in hand');
+  const recordUrl = page.url();
   for (const [view, count] of [['pending', 0], ['paid', 1], ['orders', 1]] as const) {
     await page.goto(`/view/${view}`);
     await page.getByLabel('Search', { exact: true }).fill(notes);
     await expect(page.locator('.table-caption strong')).toHaveText(String(count));
     await expect(page.locator('tbody tr')).toHaveCount(count);
     if (count) await expect(page.locator('tbody .badge')).toHaveText('Order in hand');
+    if (view === 'paid') await expect(page.getByLabel('Current sales stage', { exact: true })).toHaveValue('order_received');
   }
+  await page.goto(recordUrl);
+  await page.getByRole('button', { name: 'Dispatched', exact: true }).click();
+  await page.getByRole('button', { name: 'Mark stage reached' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.stages .current strong')).toHaveText('Dispatched');
+  await page.goto('/view/paid');
+  await page.getByLabel('Search', { exact: true }).fill(notes);
+  const filter = page.getByLabel('Current sales stage', { exact: true });
+  await expect(filter).toHaveValue('order_received');
+  await expect(page.locator('.table-caption strong')).toHaveText('0');
+  await filter.selectOption('');
+  await expect(page.locator('.table-caption strong')).toHaveText('1');
+  await filter.selectOption('dispatched');
+  await expect(page.locator('tbody .badge')).toHaveText('Dispatched');
+  await page.reload();
+  await expect(filter).toHaveValue('order_received');
+});
+
+test('order PDF uses the displayed filters and recovers from download errors', async ({ page }) => {
+  await page.goto('/view/orders');
+  const company = await page.locator('tbody .record-title').first().innerText();
+  const acquired = await page.locator('tbody time').first().getAttribute('datetime');
+  await page.getByLabel('Search', { exact: true }).fill(company);
+  await page.getByLabel('Lead acquired date', { exact: true }).selectOption('day');
+  const downloadButton = page.getByRole('button', { name: 'Create PDF', exact: true });
+  await expect(downloadButton).toBeDisabled();
+  await page.getByLabel('Acquired on', { exact: true }).fill(acquired!);
+  await expect(downloadButton).toBeEnabled();
+  const requested = page.waitForRequest(request => new URL(request.url()).pathname === '/api/records/orders/pdf');
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/api/records/orders/pdf?**', async route => { await hold; await route.continue(); });
+  const downloaded = page.waitForEvent('download');
+  await downloadButton.click();
+  const params = new URL((await requested).url()).searchParams;
+  expect(params.get('search')).toBe(company);
+  expect(params.get('start')).toBe(acquired);
+  expect(params.has('end')).toBe(true);
+  expect(params.has('offset')).toBe(false);
+  expect(params.has('limit')).toBe(false);
+  await expect(page.getByLabel('Search', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Creating PDF...', exact: true })).toBeDisabled();
+  release();
+  const download = await downloaded;
+  expect(download.suggestedFilename()).toBe('order-in-hand.pdf');
+  const file = test.info().outputPath('order-in-hand.pdf');
+  await download.saveAs(file);
+  expect((await readFile(file)).subarray(0, 5).toString()).toBe('%PDF-');
+  await page.unroute('**/api/records/orders/pdf?**');
+  await page.route('**/api/records/orders/pdf?**', route => route.fulfill({
+    status: 409, contentType: 'application/json',
+    body: JSON.stringify({ error: { message: 'Sales changed while preparing the PDF. Download again.' } }),
+  }));
+  await downloadButton.click();
+  await expect(page.getByRole('alert')).toContainText('Download again');
+  await expect(downloadButton).toBeEnabled();
+  await expect(page.getByLabel('Search', { exact: true })).toBeEnabled();
 });
 
 test('move directly to follow-up without a quotation and add or clear it later', async ({ page }) => {

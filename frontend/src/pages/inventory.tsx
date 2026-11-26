@@ -1,7 +1,7 @@
 import { useContext, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { RefreshCw } from 'lucide-react';
-import { RefreshContext, useResource } from '../api';
+import { Download, RefreshCw } from 'lucide-react';
+import { RefreshContext, usePdfDownload, useResource } from '../api';
 import { Alert, Empty, Field, Loading, Modal, PageHeader, SaveButton, TrackedForm, markFormSaved } from '../components';
 import { useManufacturing, useManufacturingResource, useManufacturingSave } from '../manufacturing-api';
 import type { Product } from '../manufacturing-types';
@@ -31,10 +31,13 @@ function StockReport({ resource, shortages, offset, setOffset, refresh }: {
 }) {
   const [demand, setDemand] = useState<StockRow | null>(null);
   const title = shortages ? 'Order in hand shortage' : 'Low stock';
+  const pdf = usePdfDownload(`/manufacturing/inventory/${shortages ? 'order-shortages' : 'low-stock'}/pdf`,
+    shortages ? 'order-in-hand-shortage.pdf' : 'low-stock.pdf');
   return <><PageHeader eyebrow="PRODUCT INVENTORY" title={title}
     description={shortages ? 'Combined requirements from New leads, Follow-ups and Order in hand, compared with actual stock.' : 'Products with stock below their minimum quantity.'}
-    action={<button className="button" onClick={refresh}><RefreshCw size={16} />Refresh</button>} />
-    {resource.error && <Alert>{resource.error}</Alert>}{resource.loading && <Loading />}
+    action={<div className="actions"><button className="button" disabled={!resource.data || resource.loading || !!resource.error || pdf.busy} onClick={pdf.download}><Download size={16} />{pdf.busy ? 'Creating PDF...' : 'Create PDF'}</button>
+      <button className="button" disabled={pdf.busy} onClick={refresh}><RefreshCw size={16} />Refresh</button></div>} />
+    {(resource.error || pdf.error) && <Alert>{resource.error || pdf.error}</Alert>}{resource.loading && <Loading />}
     {resource.data && <section className="panel details-panel">{!resource.data.items.length
       ? <Empty title={shortages ? 'No order shortages' : 'No low-stock products'} text={shortages ? 'Current stock covers the recorded requirements.' : 'Configured products are at or above their minimum quantity.'} />
       : <div className="table-scroll"><table aria-label={title}><thead><tr><th>Product</th><th>{shortages ? 'Required quantity' : 'Minimum quantity'}</th><th>In stock</th><th>Short by</th>{shortages && <th>Sales records</th>}<th>Manufacturing</th></tr></thead><tbody>
