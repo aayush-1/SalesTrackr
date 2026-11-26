@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { APIRequestContext, Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 const id = () => crypto.randomUUID().replaceAll('-', '');
 async function manufacturing(request: APIRequestContext, path: string, data: object, baseVersion: number | null = null, entityId = id()) {
@@ -26,6 +27,47 @@ async function advance(page: Page, stage: string) {
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.locator('.stages .current strong')).toHaveText(stage);
 }
+
+test('stock reports download PDFs in both workspaces and show recoverable errors', async ({ page, request }) => {
+  const productId = await manufacturing(request, '/products', {
+    name: `PDF inventory ${Date.now()}`, partNumber: 'PDF-INV', stockQuantity: 1, minimumStockQuantity: 5,
+  });
+  const account = await sales(request, 'account', { name: `PDF inventory customer ${Date.now()}` });
+  await sales(request, 'record', {
+    accountId: account.entityId, parts: [{ id: id(), productId, quantity: 3 }],
+  });
+  for (const [path, report, filename] of [
+    ['/order-shortages', 'order-shortages', 'order-in-hand-shortage.pdf'],
+    ['/manufacturing/order-shortages', 'order-shortages', 'order-in-hand-shortage.pdf'],
+    ['/manufacturing/low-stock', 'low-stock', 'low-stock.pdf'],
+  ]) {
+    await page.goto(path);
+    const button = page.getByRole('button', { name: 'Create PDF', exact: true });
+    await expect(button).toBeEnabled();
+    const requested = page.waitForRequest(request => new URL(request.url()).pathname === `/api/manufacturing/inventory/${report}/pdf`);
+    const downloaded = page.waitForEvent('download');
+    await button.click();
+    expect(new URL((await requested).url()).search).toBe('');
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toBe(filename);
+    const file = test.info().outputPath(filename);
+    await download.saveAs(file);
+    expect((await readFile(file)).subarray(0, 5).toString()).toBe('%PDF-');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  }
+  await page.route('**/api/manufacturing/inventory/low-stock/pdf', route => route.fulfill({
+    status: 409, contentType: 'application/json',
+    body: JSON.stringify({ error: { message: 'Stock changed while preparing the PDF. Download again.' } }),
+  }));
+  await page.getByRole('button', { name: 'Create PDF', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Stock changed');
+  await expect(page.getByRole('button', { name: 'Create PDF', exact: true })).toBeEnabled();
+  const product = (await (await request.get(`/api/manufacturing/products/${productId}`)).json()).entity;
+  await manufacturing(request, `/products/${productId}/stock`, {
+    stockQuantity: 10, minimumStockQuantity: 5, reason: 'Clear PDF test shortage',
+  }, product.version, productId);
+});
 
 test('real quantities, combined shortages, Dispatch retry/reversal, production and manual stock', async ({ page, request }) => {
   test.setTimeout(240_000);

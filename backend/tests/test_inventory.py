@@ -1,3 +1,4 @@
+import io
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from google.api_core.exceptions import Aborted
 from google.cloud import firestore
+from pypdf import PdfReader
 
 from backend.app.domain import RecordData, today
 from backend.app.inventory import source_key
@@ -154,6 +156,71 @@ def test_dispatch_competing_demand_reversal_retry_and_history_are_separate(inven
     assert repo.read("inventorySources", source_key("sale", rows[2]["entityId"]))["posted"] == {
         initial["id"]: -4,
     }
+
+
+@pytest.mark.parametrize("report_name", ["low-stock", "order-shortages"])
+def test_inventory_pdf_exports_all_matching_products_and_refuses_changed_data(inventory, report_name):
+    from backend.app.parts_pdf import stock_pdf
+
+    client, settings, initial, owner = inventory
+    items = [
+        create(client, "products", name=f"PDF bearing {index:02}", partNumber=f"P-{index:02}",
+               stockQuantity=1, minimumStockQuantity=5)
+        for index in range(51)
+    ]
+    if report_name == "order-shortages":
+        for item in items:
+            sales(client, "record", {
+                "accountId": owner["entityId"], "parts": [
+                    {"id": uuid4().hex, "productId": item["id"], "quantity": 6},
+                ],
+            })
+    path = f"/api/manufacturing/inventory/{report_name}"
+    result = client.get(path).json()
+    assert result["total"] == 51 and len(result["items"]) == 50
+    response = client.get(f"{path}/pdf", params={"offset": 50, "limit": 1})
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    filename = "low-stock.pdf" if report_name == "low-stock" else "order-in-hand-shortage.pdf"
+    assert f'filename="{filename}"' in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+    pages = PdfReader(io.BytesIO(response.content)).pages
+    text = "\n".join(page.extract_text() for page in pages)
+    assert "Products: 51" in text and initial["name"] not in text
+    assert all(item["name"] in text and item["partNumber"] in text for item in items)
+    positions = [text.index(item["name"]) for item in items]
+    assert positions == sorted(positions)
+    assert len(pages) == 2 and all("Manufacturing" in page.extract_text() for page in pages)
+    with patch("backend.app.parts_pdf.MAX_REPORT_ROWS", 50):
+        assert client.get(f"{path}/pdf").status_code == 413
+    repo = ManufacturingRepository(settings)
+
+    def changed(*args, **kwargs):
+        content = stock_pdf(*args, **kwargs)
+        repo.workspace.update({"sequence": firestore.Increment(1)})
+        return content
+
+    with patch("backend.app.parts_pdf.stock_pdf", side_effect=changed):
+        response = client.get(f"{path}/pdf")
+        assert response.status_code == 409 and response.json()["error"]["code"] == "report_changed"
+    repo.workspace.update({"maintenance": {"operation": "restore"}})
+    assert client.get(f"{path}/pdf").status_code == 503
+
+
+def test_inventory_pdf_empty_and_open_job_details(inventory):
+    client = inventory[0]
+    for path, message in (
+        ("low-stock", "No low-stock products."), ("order-shortages", "No order shortages."),
+    ):
+        response = client.get(f"/api/manufacturing/inventory/{path}/pdf")
+        assert response.status_code == 200, response.text
+        assert message in PdfReader(io.BytesIO(response.content)).pages[0].extract_text()
+    process(inventory)
+    created, _ = job(client, product(inventory))
+    adjust(inventory, 1)
+    response = client.get("/api/manufacturing/inventory/low-stock/pdf")
+    text = PdfReader(io.BytesIO(response.content)).pages[0].extract_text()
+    assert created["number"] in text and "1 open job" in text
 
 
 def test_quantities_must_be_explicit_whole_units(inventory):

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.cloud.firestore_v1.field_path import FieldPath
 
@@ -8,8 +8,8 @@ from .domain import Identifier, Problem
 def inventory_router(get_repo):
     router = APIRouter(prefix="/inventory")
 
-    def report(shortages, offset, limit):
-        repo = get_repo()
+    def report(shortages, offset, limit, *, repo=None, max_rows=None):
+        repo = repo or get_repo()
         for _ in range(3):
             before = repo.workspace.get().to_dict()
             query = (
@@ -21,6 +21,8 @@ def inventory_router(get_repo):
                 .order_by("__name__")
             )
             total = query.count().get()[0][0].value
+            if max_rows is not None and total > max_rows:
+                raise Problem("Too many products for one PDF.", 413, "report_size")
             items = []
             for snapshot in query.offset(offset).limit(limit).stream():
                 product = snapshot.to_dict()
@@ -63,6 +65,35 @@ def inventory_router(get_repo):
             if all(before[key] == after[key] for key in ("generation", "sequence")):
                 return {"items": items, "total": total, **repo.meta()}
         raise Problem("Stock changed while loading. Refresh and retry.", 409, "read_changed")
+
+    def download(shortages):
+        from .parts_pdf import MAX_REPORT_ROWS, stock_pdf
+
+        repo = get_repo()
+        before = repo.workspace.get().to_dict()
+        if before.get("maintenance"):
+            raise Problem("Storage maintenance is in progress. Please retry shortly.", 503, "maintenance")
+        if any(before[key] != repo.control[key] for key in ("generation", "activeDataset")):
+            raise Problem("The workspace changed. Refresh and download again.", 409, "report_changed")
+        result = report(shortages, 0, MAX_REPORT_ROWS, repo=repo, max_rows=MAX_REPORT_ROWS)
+        content = stock_pdf(result["items"], shortages=shortages)
+        after = repo.workspace.get().to_dict()
+        if after.get("maintenance") or any(
+            before[key] != after[key] for key in ("generation", "sequence", "activeDataset")
+        ):
+            raise Problem("Stock changed while preparing the PDF. Download again.", 409, "report_changed")
+        filename = "order-in-hand-shortage.pdf" if shortages else "low-stock.pdf"
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store",
+        })
+
+    @router.get("/low-stock/pdf")
+    def low_stock_pdf():
+        return download(False)
+
+    @router.get("/order-shortages/pdf")
+    def order_shortages_pdf():
+        return download(True)
 
     @router.get("/low-stock")
     def low_stock(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):

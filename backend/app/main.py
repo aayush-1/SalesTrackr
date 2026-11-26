@@ -564,6 +564,62 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
         require_id(entity_id, body.entityId)
         return mutate("contact", body, "edit_contact", request, lambda _: body.data)
 
+    def record_page(view, search, account_id, stage, date_basis, start, end, due, offset, limit):
+        if indexed:
+            return repo.query_records(
+                view, search, account_id, stage, date_basis, start, end, due, offset, limit,
+            )
+        account_data = {r["entityId"]: r["data"] for r in repo.list("account")}
+        return query_records(
+            repo.list("record"), account_data,
+            view, search, account_id, stage, date_basis, start, end, due, offset, limit,
+        )
+
+    @app.get("/api/records/orders/pdf")
+    def orders_report(
+        search: str = "", accountId: str | None = None,
+        stage: str | None = None, dateBasis: str | None = None,
+        start: date | None = None, end: date | None = None, due: str = "all",
+    ):
+        from .parts_pdf import MAX_REPORT_ROWS, orders_pdf
+
+        with repo.lock:
+            repo.sync(force=True)
+            before = dict(repo.control) if indexed else None
+            if indexed:
+                repo.check_generation(before["generation"])
+            if not metadata()["complete"]:
+                raise Problem(
+                    "Sales or accounts may be incomplete. Resolve conflicts and refresh before exporting.",
+                    409, "report_incomplete",
+                )
+            result = record_page(
+                "orders", search, accountId, stage, dateBasis, start, end, due, 0, MAX_REPORT_ROWS + 1,
+            )
+            if result["total"] > MAX_REPORT_ROWS:
+                raise Problem("Too many orders for one PDF. Narrow the filters.", 413, "report_size")
+            filters = [
+                f"Search: {search or 'All orders'}",
+                f"Lead acquired: {start.isoformat() if start else 'Any date'}"
+                f" to {end.isoformat() + ' (exclusive)' if end else 'Any date'}",
+            ]
+            if accountId:
+                filters.append(f"Account: {repo.current(accountId, 'account')['data']['name']}")
+            content = orders_pdf(filters, result["items"])
+            if indexed:
+                after = repo.workspace.get().to_dict()
+                if after.get("maintenance") or any(
+                    before[key] != after[key] for key in ("generation", "sequence", "activeDataset")
+                ):
+                    raise Problem(
+                        "Sales or accounts changed while preparing the PDF. Download again.",
+                        409, "report_changed",
+                    )
+            return Response(content, media_type="application/pdf", headers={
+                "Content-Disposition": 'attachment; filename="order-in-hand.pdf"',
+                "Cache-Control": "no-store",
+            })
+
     @app.get("/api/records")
     def records(
         view: str = "all",
@@ -579,28 +635,9 @@ def create_app(settings: Settings | None = None, repository: Repository | None =
     ):
         with repo.lock:
             repo.sync()
-            if indexed:
-                return {
-                    **repo.query_records(
-                        view, search, accountId, stage, dateBasis, start, end, due, offset, limit,
-                    ),
-                    **metadata(),
-                }
-            account_data = {r["entityId"]: r["data"] for r in repo.list("account")}
             return {
-                **query_records(
-                    repo.list("record"),
-                    account_data,
-                    view,
-                    search,
-                    accountId,
-                    stage,
-                    dateBasis,
-                    start,
-                    end,
-                    due,
-                    offset,
-                    limit,
+                **record_page(
+                    view, search, accountId, stage, dateBasis, start, end, due, offset, limit,
                 ),
                 **metadata(),
             }

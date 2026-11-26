@@ -133,6 +133,33 @@ def test_firestore_account_location_filters_and_pdf_use_current_projection(clien
         assert stale.status_code == 409 and stale.json()["error"]["code"] == "report_changed"
 
 
+def test_firestore_orders_pdf_uses_current_data_and_rejects_concurrent_changes(client, repo):
+    from backend.app.parts_pdf import orders_pdf
+
+    owner = account(repo, "Report company")
+    for index in range(27):
+        repo.commit(raw("record", data=RecordData(
+            accountId=owner["entityId"], productNotes=f"Order {index:02}",
+            stageDates={stage: "2020-01-01" for stage in STAGES[:3]},
+        ).model_dump(mode="json")))
+    for search in ("", "Order"):
+        response = client.get("/api/records/orders/pdf", params={
+            "accountId": owner["entityId"], "start": "2020-01-01", "end": "2020-01-02", "search": search,
+        })
+        assert response.status_code == 200, response.text
+        text = "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(response.content)).pages)
+        assert "Records: 27" in text and all(f"Order {index:02}" in text for index in range(27))
+
+    def changed(*args):
+        content = orders_pdf(*args)
+        account(repo, "Concurrent account")
+        return content
+
+    with patch("backend.app.parts_pdf.orders_pdf", side_effect=changed):
+        response = client.get("/api/records/orders/pdf")
+        assert response.status_code == 409 and response.json()["error"]["code"] == "report_changed"
+
+
 def test_firestore_account_save_retry_and_stale_edit(client, repo):
     response, body = write(client, repo, "account", {"name": "Example"})
     assert response.status_code == 200, response.text

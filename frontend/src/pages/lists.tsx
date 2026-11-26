@@ -1,7 +1,7 @@
 import { useContext, useRef, useState } from 'react';
-import { ArrowRight, ArrowUpRight, CircleDollarSign, Leaf, MessageSquare, PackageCheck, Plus } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, CircleDollarSign, Download, Leaf, MessageSquare, PackageCheck, Plus } from 'lucide-react';
 import { Link, useOutletContext, useParams } from 'react-router-dom';
-import { api, ApiError, generationHeaders, RefreshContext, useFormWorkspace, useResource } from '../api';
+import { api, ApiError, generationHeaders, RefreshContext, useFormWorkspace, usePdfDownload, useResource } from '../api';
 import { Alert, Completeness, Empty, Field, Loading, PageHeader, RecordTable, SaveButton } from '../components';
 import { formatDate, labels, views } from '../types';
 import type { Account, Dashboard, Detail, Kind, Me, Page, Revision, SalesRecord } from '../types';
@@ -60,7 +60,7 @@ export function RecordList({ view = 'all', accountId }: { view?: string; account
   const [end, setEnd] = useState('');
   const [selectedMonth, setMonth] = useState<string | null>(null);
   const month = selectedMonth ?? me?.today.slice(0, 7) ?? '';
-  const [stage, setStage] = useState('');
+  const [stage, setStage] = useState(view === 'paid' ? 'order_received' : '');
   const [due, setDue] = useState('all');
   const [offset, setOffset] = useState(0);
   const query = new URLSearchParams({ view, search, offset: String(offset), limit: '25', due });
@@ -78,13 +78,16 @@ export function RecordList({ view = 'all', accountId }: { view?: string; account
   const dateReady = period === 'all' || (period === 'today' && !!me) || (period === 'month' && !!month)
     || (period === 'day' && !!start) || (period === 'range' && !!(start || end));
   const { data, error, loading } = useResource<Page<SalesRecord>>(dateReady ? `/records?${query}` : null);
+  const pdfQuery = new URLSearchParams(query); pdfQuery.delete('offset'); pdfQuery.delete('limit');
+  const pdf = usePdfDownload(`/records/orders/pdf?${pdfQuery}`, 'order-in-hand.pdf');
   const reset = () => setOffset(0);
   return <>
     {!accountId && <PageHeader eyebrow="SALES WORKSPACE" title={spec.title} description={spec.description}
-      action={<Link className="button primary" to="/records/new"><Plus size={16} />New sales record</Link>} />}
+      action={<div className="actions">{view === 'orders' && <button className="button" disabled={!dateReady || !data?.complete || loading || !!error || pdf.busy} onClick={pdf.download}><Download size={16} />{pdf.busy ? 'Creating PDF...' : 'Create PDF'}</button>}
+        <Link className="button primary" to="/records/new"><Plus size={16} />New sales record</Link></div>} />}
     {dateReady && data && <Completeness meta={data} />}
     <section className="panel">
-      <div className="filters">
+      <fieldset className="report-filters" disabled={pdf.busy}><div className="filters">
         <Field label="Search"><input value={search} onChange={e => { setSearch(e.target.value); reset(); }} placeholder="Company, location or product notes..." /></Field>
         <Field label="Lead acquired date" hint="Filter by when the lead came in; stages show its current progress."><select value={period} onChange={e => { setPeriod(e.target.value); reset(); }}>
           <option value="all">All dates</option><option value="today">Today</option><option value="day">Selected date</option><option value="month">Selected month</option><option value="range">Custom range</option>
@@ -94,8 +97,9 @@ export function RecordList({ view = 'all', accountId }: { view?: string; account
         {period === 'range' && <Field label="Through (inclusive)"><input type="date" value={end} onChange={e => { setEnd(e.target.value); reset(); }} /></Field>}
         {spec.stages.length > 1 && <Field label={view === 'discarded' ? 'Last sales stage' : 'Current sales stage'}><select value={stage} onChange={e => { setStage(e.target.value); reset(); }}><option value="">All stages in this view</option>{spec.stages.map(s => <option value={s} key={s}>{labels[s]}</option>)}</select></Field>}
         {view === 'followups' && <Field label="Follow-up due"><select value={due} onChange={e => { setDue(e.target.value); reset(); }}><option value="all">Any due date</option><option value="today">Due today</option><option value="overdue">Overdue</option></select></Field>}
-      </div>
+      </div></fieldset>
       {dateReady && error && <Alert>{error}</Alert>}
+      {pdf.error && <Alert>{pdf.error}</Alert>}
       {!dateReady ? <Empty title="Choose a lead acquisition date" text="Select a date or month to see those leads and their current progress." /> : loading ? <Loading /> : data && <>
         <div className="table-caption"><span><strong>{data.total}</strong> record{data.total === 1 ? '' : 's'}</span><small>{period === 'all' ? 'All lead acquisition dates' : 'Filtered by lead acquired date'} · newest first · India time</small></div>
         {data.items.length ? <RecordTable rows={data.items} showDiscardDetails={view === 'discarded'} /> : <Empty title="Nothing in this view" text="Try another date or status, or add a new sales record." />}

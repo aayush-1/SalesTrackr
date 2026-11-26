@@ -1,4 +1,4 @@
-"""Downloadable, filtered account and parts reports."""
+"""Compact, downloadable reports matching the workspace lists."""
 
 import io
 from datetime import date
@@ -23,27 +23,27 @@ def _report(title, details, labels, widths, values, *, highlights=(), wide=False
     output = io.BytesIO()
     pagesize = landscape(A4) if wide else A4
     document = SimpleDocTemplate(
-        output, pagesize=pagesize, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36,
+        output, pagesize=pagesize, leftMargin=24, rightMargin=24, topMargin=24, bottomMargin=30,
         title=title, author="SalesTrackr",
     )
-    normal = ParagraphStyle("PartsBody", fontName="Parts", fontSize=8.5, leading=12)
-    heading = ParagraphStyle("PartsHeading", parent=normal, fontName="PartsBold", fontSize=18, leading=24)
+    normal = ParagraphStyle("PartsBody", fontName="Parts", fontSize=8.5, leading=10)
+    heading = ParagraphStyle("PartsHeading", parent=normal, fontName="PartsBold", fontSize=15, leading=18)
     header = ParagraphStyle("PartsHeader", parent=normal, fontName="PartsBold", textColor=colors.white)
 
     def paragraph(text, style=normal):
         return Paragraph(escape(str(text)).replace("\n", "<br/>"), style)
 
-    story = [paragraph(title, heading), Spacer(1, 10)]
+    story = [paragraph(title, heading), Spacer(1, 5)]
     story.extend(paragraph(detail) for detail in details)
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 7))
     rows = [[paragraph(label, header) for label in labels]]
     rows.extend([paragraph(value) for value in row] for row in values)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#245c4b")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#dce2dc")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]
     for index in highlights:
         style.append(("BACKGROUND", (0, index + 1), (-1, index + 1), colors.HexColor("#eef8f0")))
@@ -56,10 +56,61 @@ def _report(title, details, labels, widths, values, *, highlights=(), wide=False
 
     def footer(canvas, _):
         canvas.setFont("Parts", 8)
-        canvas.drawRightString(pagesize[0] - 36, 20, f"Page {canvas.getPageNumber()}")
+        canvas.drawRightString(pagesize[0] - 24, 16, f"Page {canvas.getPageNumber()}")
 
     document.build(story, onFirstPage=footer, onLaterPages=footer)
     return output.getvalue()
+
+
+def orders_pdf(filters, records):
+    def formatted(value):
+        return date.fromisoformat(value).strftime("%d %b %Y") if value else "-"
+
+    return _report(
+        "Order in hand", [*filters, f"Records: {len(records)} | Newest lead acquired first | India time"],
+        ("Company / location", "Product / requirement", "Lead acquired",
+         "Current sales stage", "Stage date", "Next follow-up"),
+        (0.23, 0.36, 0.105, 0.10, 0.105, 0.10),
+        [(
+            f"{row['accountName']}\n{row.get('accountLocation') or 'Location not added'}",
+            row["data"].get("productNotes") or "No product notes",
+            formatted(row["data"]["stageDates"]["new_lead"]), "Order in hand",
+            formatted(row["data"]["stageDates"].get("order_received")),
+            formatted(row["data"].get("nextFollowUpOn")),
+        ) for row in records],
+        wide=True, empty="No orders found.",
+    )
+
+
+def stock_pdf(products, *, shortages=False):
+    values = []
+    for product in products:
+        count = product["openJobCount"]
+        jobs = [f"{count} open job{'s' if count != 1 else ''}" if count else "No open jobs"]
+        jobs.extend(
+            f"{job['number']} / "
+            f"{job['quantity'] if job.get('quantity') is not None else 'Quantity not recorded'}"
+            for job in product["openJobs"]
+        )
+        if count > len(product["openJobs"]):
+            jobs.append(f"Showing {len(product['openJobs'])} of {count} jobs")
+        values.append((
+            product.get("partNumber") or "Not added", product["name"],
+            product["requiredQuantity"] if shortages else product["minimumStockQuantity"],
+            product["stockQuantity"], product["missingQuantity"],
+            *((product["salesCount"],) if shortages else ()), "\n".join(jobs),
+        ))
+    return _report(
+        "Order in hand shortage" if shortages else "Low stock",
+        [("Demand from New leads, Follow-ups and Order in hand."
+          if shortages else "Products with stock below their minimum quantity."),
+         f"Products: {len(products)} | Product name order"],
+        ("Part number", "Product", "Required quantity" if shortages else "Minimum quantity",
+         "In stock", "Short by", *(("Sales records",) if shortages else ()), "Manufacturing"),
+        (0.14, 0.28, 0.10, 0.09, 0.09, 0.08, 0.22) if shortages else (0.14, 0.32, 0.10, 0.10, 0.10, 0.24),
+        values, wide=True,
+        empty="No order shortages." if shortages else "No low-stock products.",
+    )
 
 
 def machine_parts_pdf(account, machine, model_name, products):
